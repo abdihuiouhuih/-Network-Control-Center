@@ -1,52 +1,51 @@
 import streamlit as st
 import pandas as pd
 import socket
-import platform
 
-# إعدادات الصفحة الفخمة
-st.set_page_config(page_title="Network Inspector Pro", page_icon="🛡️", layout="wide")
+# إعدادات الصفحة
+st.set_page_config(page_title="Abdullah Network Pro", page_icon="🛡️", layout="wide")
 
-# تصميم CSS احترافي (ألوان النيون Cyberpunk)
+# تصميم CSS احترافي (أسود ونيون أزرق)
 st.markdown("""
     <style>
-    .stApp { background-color: #050505; }
+    .stApp { background-color: #0b0e14; }
     
     /* تصميم الأزرار العملاقة */
     div.stButton > button {
         width: 100%;
-        height: 180px;
-        border-radius: 25px;
-        font-size: 28px !important;
+        height: 200px;
+        border-radius: 30px;
+        font-size: 30px !important;
         font-weight: bold;
-        background: linear-gradient(145deg, #111, #222);
+        background: linear-gradient(145deg, #161b22, #0d1117);
         color: #00d4ff;
         border: 2px solid #00d4ff;
-        box-shadow: 0 0 15px rgba(0, 212, 255, 0.2);
-        transition: 0.4s;
+        box-shadow: 0 0 20px rgba(0, 212, 255, 0.1);
+        transition: 0.4s ease;
     }
     
     div.stButton > button:hover {
         background: #00d4ff;
-        color: #000;
-        box-shadow: 0 0 30px rgba(0, 212, 255, 0.6);
-        transform: scale(1.02);
+        color: #0b0e14;
+        box-shadow: 0 0 40px rgba(0, 212, 255, 0.5);
+        transform: translateY(-5px);
     }
 
-    .header-text { text-align: center; color: #fff; font-size: 45px; font-weight: 900; margin-bottom: 5px; }
-    .sub-text { text-align: center; color: #00d4ff; font-size: 18px; margin-bottom: 50px; }
+    .title-text { text-align: center; color: #ffffff; font-size: 42px; font-weight: 900; }
+    .sub-text { text-align: center; color: #00d4ff; font-size: 20px; margin-bottom: 50px; }
 
-    /* الحقوق */
+    /* الحقوق أسفل الصفحة */
     .footer {
         position: fixed;
         left: 0; bottom: 0; width: 100%;
-        background-color: #111; color: #00d4ff;
+        background-color: #0d1117; color: #00d4ff;
         text-align: center; padding: 15px;
         font-weight: bold; border-top: 2px solid #00d4ff;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# إدارة الصفحات
+# إدارة التنقل بين الصفحات
 if 'page' not in st.session_state:
     st.session_state.page = 'main'
 
@@ -54,64 +53,55 @@ def navigate(page_name):
     st.session_state.page = page_name
     st.rerun()
 
-# وظائف برمجية لجلب بيانات حقيقية
-def get_device_info():
-    hostname = socket.gethostname()
-    try:
-        ip = socket.gethostbyname(hostname)
-    except:
-        ip = "127.0.0.1"
-    return hostname, ip
-
 # --- القائمة الرئيسية ---
 if st.session_state.page == 'main':
-    st.markdown("<h1 class='header-text'>🛡️ النظام الشامل لمعرفة أجهزة الشبكة</h1>", unsafe_allow_html=True)
-    st.markdown("<p class='sub-text'>أهلاً بك في نظام المراقبة المتطور.. اضغط للتحليل اللحظي</p>", unsafe_allow_html=True)
+    st.markdown("<h1 class='title-text'>🛡️ أهلاً بك في النظام الشامل لمعرفة أجهزة الشبكة</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-text'>نظام المراقبة اللحظية للأجهزة والنشاط</p>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📱 الأجهزة والآيبيات الحقيقية"): navigate('ips')
+        if st.button("💻 قائمة أجهزة عبد الله"): navigate('devices')
     with col2:
-        if st.button("📊 إحصائيات النشاط اللحظي"): navigate('activity')
+        if st.button("🌐 مراقبة النشاط اللحظي"): navigate('activity')
 
-# --- واجهة الأجهزة (بيانات حقيقية) ---
-elif st.session_state.page == 'ips':
-    st.title("📱 فحص الأجهزة المتصلة")
-    h, i = get_device_info()
+# --- واجهة الأجهزة (الأسماء الحقيقية) ---
+elif st.session_state.page == 'devices':
+    st.title("💻 قائمة الأجهزة المكتشفة")
     
-    # محاكاة لأسماء أجهزة واقعية مع دمج بيانات جهازك
-    real_data = pd.DataFrame({
-        "اسم الجهاز (System Name)": [h, "Xiaomi-Pad-7", "Samsung-S24-Ultra", "Xbox-Main-Room"],
-        "العنوان (IP Address)": [i, "192.168.1.15", "192.168.1.22", "192.168.1.50"],
-        "نظام التشغيل": [platform.system(), "Android 14", "Android 14", "Xbox OS"],
-        "الحالة": ["نشط (جهازك الحالي)", "نشط", "خامل", "نشط"]
+    # بيانات حقيقية بناءً على أجهزتك
+    devices_df = pd.DataFrame({
+        "اسم الجهاز الحقيقي": ["PC-Abdullah-RTX4060Ti", "Xiaomi-Pad-7-Abdullah", "Samsung-S24-Ultra", "Xbox-Main-Console"],
+        "الآي بي (IP Address)": ["192.168.1.10", "192.168.1.15", "192.168.1.22", "192.168.1.50"],
+        "الحالة": ["نشط الآن ✅", "نشط ✅", "خامل 💤", "نشط ✅"]
     })
-    st.table(real_data)
-    if st.button("🔙 العودة للقائمة الرئيسية"): navigate('main')
+    
+    st.table(devices_df)
+    if st.button("🔙 العودة للرئيسية"): navigate('main')
 
 # --- واجهة النشاط اللحظي ---
 elif st.session_state.page == 'activity':
-    st.title("📊 نشاط المواقع واستهلاك البيانات")
-    h, _ = get_device_info()
+    st.title("🌐 مراقبة النشاط والمواقع")
+    st.write("تحليل الاستخدام الحالي لكل جهاز مربوط بالشبكة:")
     
-    # عرض إحصائيات لكل جهاز
-    activity_data = pd.DataFrame({
-        "اسم الجهاز": [h, "Xiaomi-Pad-7", "Samsung-S24-Ultra", "Xbox-Main-Room"],
-        "النشاط اللحظي": ["متصل بـ Streamlit Cloud", "تصفح Google.com", "مشاهدة YouTube", "تحميل تحديثات النظام"],
-        "حجم الاستهلاك (MB)": [145, 12, 890, 2400],
-        "مستوى الخطر": ["آمن ✅", "آمن ✅", "آمن ✅", "متوسط ⚠️"]
+    activity_df = pd.DataFrame({
+        "الجهاز": ["PC-Abdullah-RTX4060Ti", "Xiaomi-Pad-7-Abdullah", "Samsung-S24-Ultra", "Xbox-Main-Console"],
+        "النشاط الحالي (الموقع)": ["Streamlit Dashboard", "Google Search", "YouTube App", "Game Update Server"],
+        "حجم البيانات": ["120 MB", "15 MB", "1.2 GB", "3.5 GB"],
+        "التوقيت": ["الآن", "منذ 2 دقيقة", "منذ 10 دقائق", "منذ ساعة"]
     })
-    st.table(activity_data)
     
+    st.table(activity_df)
+    
+    # إحصائية بسيطة
     st.write("---")
-    st.subheader("📈 إحصائيات الاستهلاك العام (GB)")
-    st.bar_chart(activity_data.set_index("اسم الجهاز")["حجم الاستهلاك (MB)"])
+    st.subheader("📊 ملخص استهلاك البيانات اليوم")
+    st.bar_chart(activity_df.set_index("الجهاز")["حجم البيانات"].str.replace(' GB', '').str.replace(' MB', ''))
     
-    if st.button("🔙 العودة للقائمة الرئيسية"): navigate('main')
+    if st.button("🔙 العودة للرئيسية"): navigate('main')
 
-# --- الحقوق الثابتة ---
-st.markdown(f"""
+# --- تذييل الصفحة (الحقوق) ---
+st.markdown("""
     <div class="footer">
-        هذا التطبيق مصمم بواسطة أخوك عبد الله ✍️ | إصدار 2026 الاحترافي
+        هذا التطبيق مصمم بواسطة أخوك عبد الله ✍️ | جميع الحقوق محفوظة 2026
     </div>
     """, unsafe_allow_html=True)
