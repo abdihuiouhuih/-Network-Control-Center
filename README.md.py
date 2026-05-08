@@ -1,75 +1,85 @@
 import customtkinter as ctk
-from scapy.all import ARP, Ether, srp
+from scapy.all import ARP, Ether, srp, sniff, IP, DNS, DNSQR
+import threading
 import socket
 
-# إعدادات الواجهة
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
-
-class NetworkApp(ctk.CTk):
+class NetworkMaster(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Network Sentinel - مراقب الشبكة")
-        self.geometry("800x600")
 
-        # إنشاء نظام القوائم الجانبية
+        self.title("Network Monitor Pro | مراقب الشبكة الذكي")
+        self.geometry("900x600")
+        ctk.set_appearance_mode("dark")
+
+        # تقسيم الشاشة (يسار: أزرار، يمين: عرض)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         # القائمة الجانبية
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        
-        self.logo_label = ctk.CTkLabel(self.sidebar, text="التحكم بالشبكة", font=ctk.CTkFont(size=20, weight="bold"))
-        self.logo_label.pack(pady=20)
+        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=10)
+        self.sidebar.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-        self.btn_scan = ctk.CTkButton(self.sidebar, text="فحص الأجهزة", command=self.show_scan_page)
+        self.label = ctk.CTkLabel(self.sidebar, text="التحكم", font=("Arial", 18, "bold"))
+        self.label.pack(pady=20)
+
+        self.btn_scan = ctk.CTkButton(self.sidebar, text="فحص الأجهزة", command=self.start_scan_thread)
         self.btn_scan.pack(pady=10, padx=10)
 
-        self.btn_activity = ctk.CTkButton(self.sidebar, text="نشاط المواقع", command=self.show_activity_page)
-        self.btn_activity.pack(pady=10, padx=10)
+        self.btn_sniff = ctk.CTkButton(self.sidebar, text="مراقبة المواقع", command=self.start_sniffing_thread)
+        self.btn_sniff.pack(pady=10, padx=10)
 
-        self.btn_info = ctk.CTkButton(self.sidebar, text="بيانات الشبكة", command=self.show_info_page)
-        self.btn_info.pack(pady=10, padx=10)
+        # منطقة العرض مع التنسيق
+        self.display_area = ctk.CTkTextbox(self, font=("Consolas", 13))
+        self.display_area.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.display_area.insert("0.0", "--- جاهز للعمل. اختر 'فحص الأجهزة' لرؤية المتصلين ---\n")
 
-        # القائمة الرئيسية (المحتوى المتغير)
-        self.main_view = ctk.CTkTextbox(self, font=("Arial", 14))
-        self.main_view.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
-        self.main_view.insert("0.0", "مرحباً بك! اختر قائمة من اليسار للبدء...")
-
-    def get_local_ip(self):
-        # الحصول على IP الجهاز الحالي
+    def get_my_ip(self):
         return socket.gethostbyname(socket.gethostname())
 
-    def show_scan_page(self):
-        self.main_view.delete("0.0", "end")
-        self.main_view.insert("end", "جاري فحص الأجهزة المتصلة... انتظر لحظة\n" + "-"*40 + "\n")
+    # --- وظيفة فحص الأجهزة ---
+    def start_scan_thread(self):
+        threading.Thread(target=self.scan_network, daemon=True).start()
+
+    def scan_network(self):
+        self.display_area.delete("0.0", "end")
+        self.display_area.insert("end", "[+] جاري فحص الشبكة... قد يستغرق الأمر ثواني\n")
         
-        # كود فحص الأجهزة (ARP Scan)
-        target_ip = ".".join(self.get_local_ip().split('.')[:-1]) + ".1/24"
-        arp = ARP(pdst=target_ip)
-        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-        packet = ether/arp
-        result = srp(packet, timeout=3, verbose=0)[0]
+        try:
+            my_ip = self.get_my_ip()
+            ip_range = ".".join(my_ip.split('.')[:-1]) + ".1/24"
+            
+            # إرسال طلب ARP لكل الأجهزة
+            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=ip_range), timeout=2, verbose=False)
+            
+            self.display_area.insert("end", f"{'IP Address':<20} | {'MAC Address':<20}\n")
+            self.display_area.insert("end", "-"*50 + "\n")
+            
+            for sent, rcv in ans:
+                self.display_area.insert("end", f"{rcv.psrc:<20} | {rcv.hwsrc:<20}\n")
+        except Exception as e:
+            self.display_area.insert("end", f"خطأ: تأكد من تشغيل البرنامج كمسؤول (Admin)\n{e}")
 
-        for sent, received in result:
-            self.main_view.insert("end", f"جهاز: {received.psrc}  |  ماك أدريس: {received.hwsrc}\n")
+    # --- وظيفة مراقبة المواقع ---
+    def start_sniffing_thread(self):
+        self.display_area.delete("0.0", "end")
+        self.display_area.insert("end", "[!] جاري مراقبة طلبات DNS (المواقع)... اضغط 'فحص الأجهزة' للإيقاف\n\n")
+        threading.Thread(target=self.sniff_packets, daemon=True).start()
 
-    def show_activity_page(self):
-        self.main_view.delete("0.0", "end")
-        self.main_view.insert("end", "قائمة المواقع والنشاط (تجريبي):\n")
-        self.main_view.insert("end", "> ملاحظة: هذه الخاصية تتطلب وضع 'Sniffing' وتحليل الحزم (Packet Capture).\n")
-        self.main_view.insert("end", "1. IP 192.168.1.5 -> طلب اتصال بـ Google.com\n")
-        self.main_view.insert("end", "2. IP 192.168.1.12 -> نشاط يوتيوب مرتفع\n")
+    def process_packet(self, pkt):
+        # البحث عن طلبات DNS (المواقع التي يتم زيارتها)
+        if pkt.haslayer(DNSQR):
+            site = pkt[DNSQR].qname.decode('utf-8')
+            ip_src = pkt[IP].src
+            self.display_area.insert("end", f"[زيارة موقع] الجهاز {ip_src} دخل على: {site}\n")
+            self.display_area.see("end") # النزول التلقائي لآخر سطر
 
-    def show_info_page(self):
-        self.main_view.delete("0.0", "end")
-        info = f"آي بي جهازك: {self.get_local_ip()}\n" \
-               f"اسم الشبكة (SSID): متصل\n" \
-               f"حالة الأمان: نشط\n" \
-               f"الرقم السري (المخزن محلياً): ********"
-        self.main_view.insert("end", info)
+    def sniff_packets(self):
+        try:
+            # فلترة حزم DNS فقط (التي تحتوي على أسماء المواقع)
+            sniff(filter="udp port 53", prn=self.process_packet, store=0)
+        except Exception as e:
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
-    app = NetworkApp()
+    app = NetworkMaster()
     app.mainloop()
