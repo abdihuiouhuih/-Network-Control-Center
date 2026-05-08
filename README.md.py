@@ -1,74 +1,102 @@
 import streamlit as st
 import pandas as pd
-import socket
 
 # إعدادات الصفحة
-st.set_page_config(page_title="Network Tool", page_icon="📶")
+st.set_page_config(page_title="Network Control", page_icon="🌐", layout="centered")
 
-# تنسيق بسيط للواجهة (CSS)
+# CSS لجعل الأزرار كبيرة والواجهة أنيقة
 st.markdown("""
     <style>
+    div.stButton > button {
+        width: 100%;
+        height: 60px;
+        font-size: 20px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+    }
     .footer {
         position: fixed;
         left: 0;
         bottom: 0;
         width: 100%;
-        background-color: transparent;
-        color: #777;
         text-align: center;
+        color: #888;
         padding: 10px;
-        font-size: 14px;
-    }
-    .main-title {
-        text-align: center;
-        color: #007BFF;
-        font-family: 'Arial';
     }
     </style>
     """, unsafe_allow_html=True)
 
-# العنوان الرئيسي
-st.markdown("<h1 class='main-title'>📶 النظام الشامل لمعرفة أجهزة الشبكة</h1>", unsafe_allow_html=True)
-st.write("<center>أهلاً بك في نظامك الخاص لمراقبة وتحليل نشاط الشبكة بسهولة تامة.</center>", unsafe_allow_html=True)
-st.markdown("---")
+# إدارة التنقل بين الواجهات
+if 'page' not in st.session_state:
+    st.session_state.page = 'home'
 
-# القوائم البسيطة (Tabs) بدلاً من القائمة الجانبية المعقدة
-tab1, tab2, tab3 = st.tabs(["🔍 فحص الأجهزة", "🌐 نشاط المواقع", "🔑 بيانات الوصول"])
+def go_to(page_name):
+    st.session_state.page = page_name
 
-with tab1:
-    st.subheader("الأجهزة المتصلة حالياً")
-    # بيانات تجريبية بسيطة
-    devices = pd.DataFrame({
-        "اسم الجهاز": ["هاتف ذكي", "جهاز لوحي", "كمبيوتر", "إكس بوكس"],
-        "الآي بي (IP)": ["192.168.1.15", "192.168.1.20", "192.168.1.10", "192.168.1.50"],
-        "الحالة": ["نشط", "نشط", "خامل", "نشط"]
+# --- الواجهة الرئيسية (القائمة) ---
+if st.session_state.page == 'home':
+    st.markdown("<h1 style='text-align: center;'>🌐 النظام الشامل لمعرفة أجهزة الشبكة</h1>", unsafe_allow_html=True)
+    st.write("<p style='text-align: center;'>اختر القسم الذي تريد استكشافه من القائمة أدناه:</p>", unsafe_allow_html=True)
+    st.write("")
+
+    if st.button("📱 قائمة الأجهزة والآيبيات"):
+        go_to('devices')
+    
+    if st.button("🌍 مراقبة المواقع والنشاط"):
+        go_to('activity')
+    
+    if st.button("🔐 بيانات الشبكة السرية"):
+        go_to('security')
+
+# --- واجهة الأجهزة والآيبيات ---
+elif st.session_state.page == 'devices':
+    st.header("📱 الأجهزة والآيبيات المتصلة")
+    st.write("تفاصيل الأجهزة المتصلة حالياً بالشبكة:")
+    
+    devices_data = pd.DataFrame({
+        "اسم الجهاز": ["هاتف ذكي", "Xiaomi Pad 7", "Samsung S24 Ultra", "جهاز الكمبيوتر"],
+        "الآي بي (IP)": ["192.168.1.15", "192.168.1.20", "192.168.1.22", "192.168.1.10"],
+        "الاستخدام": ["منخفض", "متوسط", "عالي", "عالي جداً"]
     })
-    st.table(devices)
-    if st.button("تحديث الفحص"):
-        st.toast("جاري تحديث القائمة...")
+    st.table(devices_data)
+    
+    if st.button("🔙 العودة للقائمة الرئيسية"):
+        go_to('home')
 
-with tab2:
-    st.subheader("سجل المواقع الأخير")
-    st.write("ملخص للمواقع التي تم زيارتها عبر الشبكة:")
-    logs = pd.DataFrame({
-        "الجهاز": ["192.168.1.15", "192.168.1.10", "192.168.1.50"],
-        "الموقع": ["google.com", "github.com", "youtube.com"],
-        "التوقيت": ["منذ دقيقتين", "منذ 5 دقائق", "منذ ساعة"]
+# --- واجهة مراقبة المواقع ---
+elif st.session_state.page == 'activity':
+    st.header("🌍 سجل المواقع والنشاط")
+    st.write("المواقع التي يتم تصفحها حالياً عبر الشبكة:")
+    
+    sites_data = pd.DataFrame({
+        "الجهاز": ["192.168.1.10", "192.168.1.20", "192.168.1.22"],
+        "الموقع الحالي": ["github.com", "google.com.sa", "youtube.com"],
+        "الحالة": ["نشط الآن", "خامل", "بث فيديو"]
     })
-    st.dataframe(logs, use_container_width=True)
+    st.dataframe(sites_data, use_container_width=True)
+    
+    if st.button("🔙 العودة للقائمة الرئيسية"):
+        go_to('home')
 
-with tab3:
-    st.subheader("معلومات الشبكة الحالية")
-    st.info("بيانات الاتصال المحمية")
-    st.text(f"IP الجهاز الحالي: {socket.gethostbyname(socket.gethostname())}")
-    st.text("نوع التشفير: WPA2-Personal")
-    if st.button("إظهار رمز الدخول"):
-        st.code("Pass: Abdullah_2026", language="text")
+# --- واجهة بيانات الشبكة ---
+elif st.session_state.page == 'security':
+    st.header("🔐 بيانات الوصول للشبكة")
+    st.write("معلومات الشبكة الخاصة بك:")
+    
+    with st.container():
+        st.info(f"**اسم الشبكة (SSID):** Abdullah_Home_Network")
+        st.warning(f"**نوع الحماية:** WPA2-PSK (AES)")
+        
+        if st.button("🔑 إظهار الرقم السري"):
+            st.success("الرمز هو: **Abdullah@2026**")
+    
+    if st.button("🔙 العودة للقائمة الرئيسية"):
+        go_to('home')
 
-# وضع الحقوق في أسفل الصفحة
-st.markdown("""
+# --- الحقوق الثابتة في الأسفل ---
+st.markdown(f"""
     <div class="footer">
         <hr>
-        هذا التطبيق مصمم بواسطة أخوك <b>عبد الله</b> | جميع الحقوق محفوظة 2026 ©
+        هذا التطبيق مصمم بواسطة أخوك <b>عبد الله</b>
     </div>
     """, unsafe_allow_html=True)
