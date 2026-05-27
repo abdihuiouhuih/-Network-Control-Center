@@ -2,21 +2,20 @@ import streamlit as st
 import pandas as pd
 import socket
 import uuid
-import psutil
 import random
 
-# -----------------------------
+# --------------------------------
 # إعداد الصفحة
-# -----------------------------
+# --------------------------------
 st.set_page_config(
     page_title="Network Control Center",
     page_icon="🌐",
     layout="wide"
 )
 
-# -----------------------------
-# CSS احترافي جدًا
-# -----------------------------
+# --------------------------------
+# تصميم احترافي
+# --------------------------------
 st.markdown("""
 <style>
 
@@ -29,6 +28,7 @@ st.markdown("""
     font-size:60px;
     color:white;
     font-weight:bold;
+    margin-top:-20px;
 }
 
 .sub-title{
@@ -68,19 +68,12 @@ div.stButton > button:hover{
     border-top:1px solid #38bdf8;
 }
 
-.metric-box{
-    background:#0f172a;
-    padding:20px;
-    border-radius:20px;
-    border:1px solid #38bdf8;
-}
-
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
+# --------------------------------
 # التنقل
-# -----------------------------
+# --------------------------------
 if "page" not in st.session_state:
     st.session_state.page = "main"
 
@@ -88,10 +81,10 @@ def navigate(page):
     st.session_state.page = page
     st.rerun()
 
-# -----------------------------
-# الجهاز الحالي
-# -----------------------------
-def current_device():
+# --------------------------------
+# معلومات الجهاز الحالي
+# --------------------------------
+def get_current_device():
 
     hostname = socket.gethostname()
 
@@ -109,18 +102,12 @@ def current_device():
         "اسم الجهاز": hostname,
         "IP": ip,
         "MAC": mac,
-        "الحالة": "🟢 متصل",
-        "النشاط": random.choice([
-            "🌐 Browsing",
-            "🎮 Gaming",
-            "📺 Streaming",
-            "💻 Programming"
-        ])
+        "الحالة": "🟢 متصل"
     }
 
-# -----------------------------
+# --------------------------------
 # الصفحة الرئيسية
-# -----------------------------
+# --------------------------------
 if st.session_state.page == "main":
 
     st.markdown(
@@ -129,7 +116,7 @@ if st.session_state.page == "main":
     )
 
     st.markdown(
-        "<p class='sub-title'>لوحة مراقبة الشبكة الاحترافية</p>",
+        "<p class='sub-title'>لوحة مراقبة الشبكة</p>",
         unsafe_allow_html=True
     )
 
@@ -143,30 +130,28 @@ if st.session_state.page == "main":
         if st.button("📊 استخدام الأجهزة"):
             navigate("usage")
 
-# -----------------------------
+# --------------------------------
 # صفحة الأجهزة
-# -----------------------------
+# --------------------------------
 elif st.session_state.page == "devices":
 
     st.title("📱 الأجهزة المتصلة")
 
-    device = current_device()
+    current_device = get_current_device()
 
     devices = [
-        device,
+        current_device,
         {
             "اسم الجهاز":"PlayStation 5",
             "IP":"192.168.1.25",
             "MAC":"F1:A2:B3:C4:D5:E6",
-            "الحالة":"🟢 متصل",
-            "النشاط":"🎮 Gaming"
+            "الحالة":"🟢 متصل"
         },
         {
             "اسم الجهاز":"Samsung S24 Ultra",
             "IP":"192.168.1.12",
             "MAC":"A1:B2:C3:D4:E5:F6",
-            "الحالة":"🟢 متصل",
-            "النشاط":"📱 Social Media"
+            "الحالة":"🟢 متصل"
         }
     ]
 
@@ -178,45 +163,45 @@ elif st.session_state.page == "devices":
     if st.button("🔙 العودة"):
         navigate("main")
 
-# -----------------------------
+# --------------------------------
 # صفحة الاستخدام
-# -----------------------------
+# --------------------------------
 elif st.session_state.page == "usage":
 
-    st.title("📊 نشاط الأجهزة")
+    st.title("📊 استخدام الأجهزة")
 
-    usage = [
+    usage_data = [
         {
             "الجهاز":"PlayStation 5",
-            "الحالة":"يلعب FIFA Online",
-            "الاستخدام":"Gaming Traffic",
-            "DNS":"ea.com"
+            "الاستخدام":"🎮 Gaming",
+            "DNS":"ea.com",
+            "الحالة":"نشط"
         },
         {
             "الجهاز":"Samsung S24 Ultra",
-            "الحالة":"يتصفح",
-            "الاستخدام":"Social Media",
-            "DNS":"tiktok.com"
+            "الاستخدام":"📱 Social Media",
+            "DNS":"tiktok.com",
+            "الحالة":"نشط"
         },
         {
             "الجهاز":"Gaming PC",
-            "الحالة":"يشاهد فيديو",
-            "الاستخدام":"Streaming",
-            "DNS":"youtube.com"
+            "الاستخدام":"💻 Programming",
+            "DNS":"github.com",
+            "الحالة":"نشط"
         }
     ]
 
     st.dataframe(
-        pd.DataFrame(usage),
+        pd.DataFrame(usage_data),
         use_container_width=True
     )
 
     if st.button("🔙 العودة"):
         navigate("main")
 
-# -----------------------------
+# --------------------------------
 # الفوتر
-# -----------------------------
+# --------------------------------
 st.markdown("""
 <div class='footer'>
 هذا التطبيق مصمم من أخوك عبد الله 🚀
