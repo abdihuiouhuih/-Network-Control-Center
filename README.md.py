@@ -1,59 +1,59 @@
 import streamlit as st
-import socket
-import platform
 import pandas as pd
+import socket
 import uuid
+import random
 
-# --------------------------
+# -----------------------------
 # إعداد الصفحة
-# --------------------------
+# -----------------------------
 st.set_page_config(
     page_title="Network Monitor Pro",
     page_icon="🌐",
     layout="wide"
 )
 
-# --------------------------
+# -----------------------------
 # CSS احترافي
-# --------------------------
+# -----------------------------
 st.markdown("""
 <style>
 
 .stApp{
-    background-color:#0b1120;
+    background:#020817;
 }
 
 .main-title{
     text-align:center;
     color:white;
-    font-size:50px;
+    font-size:55px;
     font-weight:bold;
+    margin-top:-20px;
 }
 
 .sub-title{
     text-align:center;
     color:#94a3b8;
-    font-size:22px;
-    margin-bottom:40px;
-}
-
-.info-box{
-    background:#111827;
-    padding:25px;
-    border-radius:20px;
-    border:1px solid #38bdf8;
-    margin-bottom:20px;
+    font-size:24px;
+    margin-bottom:50px;
 }
 
 div.stButton > button{
     width:100%;
-    height:70px;
-    border-radius:20px;
-    font-size:25px;
+    height:220px;
+    border-radius:30px;
+    font-size:35px;
     font-weight:bold;
+    background:linear-gradient(145deg,#1e293b,#0f172a);
+    color:#38bdf8;
+    border:3px solid #38bdf8;
+    transition:0.3s;
+}
+
+div.stButton > button:hover{
+    transform:scale(1.03);
     background:#38bdf8;
-    color:black;
-    border:none;
+    color:#0f172a;
 }
 
 .footer{
@@ -61,102 +61,181 @@ div.stButton > button{
     bottom:0;
     left:0;
     width:100%;
-    background:#111827;
+    background:#0f172a;
     color:#38bdf8;
     text-align:center;
-    padding:10px;
+    padding:12px;
     font-weight:bold;
+    border-top:1px solid #38bdf8;
 }
 
 </style>
 """, unsafe_allow_html=True)
 
-# --------------------------
-# عنوان التطبيق
-# --------------------------
-st.markdown(
-    "<h1 class='main-title'>🌐 Network Monitor Pro</h1>",
-    unsafe_allow_html=True
-)
+# -----------------------------
+# التنقل بين الصفحات
+# -----------------------------
+if "page" not in st.session_state:
+    st.session_state.page = "main"
 
-st.markdown(
-    "<p class='sub-title'>معلومات الشبكة والجهاز الحالي بشكل مباشر</p>",
-    unsafe_allow_html=True
-)
+def navigate(page):
+    st.session_state.page = page
+    st.rerun()
 
-# --------------------------
-# معلومات الجهاز
-# --------------------------
-def get_device_info():
+# -----------------------------
+# جلب معلومات الجهاز الحالي
+# -----------------------------
+def get_current_device():
 
     hostname = socket.gethostname()
 
     try:
-        ip_address = socket.gethostbyname(hostname)
+        ip = socket.gethostbyname(hostname)
     except:
-        ip_address = "غير معروف"
+        ip = "127.0.0.1"
 
     mac = ':'.join([
-        '{:02x}'.format((uuid.getnode() >> elements) & 0xff)
-        for elements in range(0,8*6,8)
+        '{:02x}'.format((uuid.getnode() >> ele) & 0xff)
+        for ele in range(0,8*6,8)
     ][::-1])
-
-    system = platform.system()
-    processor = platform.processor()
 
     return {
         "اسم الجهاز": hostname,
-        "عنوان IP": ip_address,
-        "MAC Address": mac,
-        "نظام التشغيل": system,
-        "المعالج": processor
+        "IP": ip,
+        "MAC": mac,
+        "نوع الاتصال": "WiFi"
     }
 
-# --------------------------
-# زر التحديث
-# --------------------------
-if st.button("🔄 تحديث معلومات الشبكة"):
+# -----------------------------
+# توليد أجهزة وهمية ديناميكية
+# -----------------------------
+def generate_devices():
 
-    info = get_device_info()
+    current = get_current_device()
 
-    df = pd.DataFrame({
-        "المعلومة": list(info.keys()),
-        "القيمة": list(info.values())
-    })
+    devices = [
+        current,
+        {
+            "اسم الجهاز":"Samsung Phone",
+            "IP":"192.168.1.15",
+            "MAC":"A1:B2:C3:D4:E5:F6",
+            "نوع الاتصال":"WiFi"
+        },
+        {
+            "اسم الجهاز":"Xiaomi Tablet",
+            "IP":"192.168.1.20",
+            "MAC":"B2:C3:D4:E5:F6:G7",
+            "نوع الاتصال":"WiFi"
+        },
+        {
+            "اسم الجهاز":"Gaming PC",
+            "IP":"192.168.1.25",
+            "MAC":"C3:D4:E5:F6:G7:H8",
+            "نوع الاتصال":"Ethernet"
+        }
+    ]
 
-    st.success("تم تحديث المعلومات بنجاح")
+    return devices
+
+# -----------------------------
+# أنشطة تقريبية
+# -----------------------------
+activities = [
+    "🎮 Gaming",
+    "📺 Streaming",
+    "🌐 Browsing",
+    "💻 Programming",
+    "📱 Social Media"
+]
+
+websites = [
+    "youtube.com",
+    "github.com",
+    "tiktok.com",
+    "netflix.com",
+    "xboxlive.com"
+]
+
+# -----------------------------
+# الصفحة الرئيسية
+# -----------------------------
+if st.session_state.page == "main":
+
+    st.markdown(
+        "<h1 class='main-title'>🌐 Network Monitor Pro</h1>",
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        "<p class='sub-title'>لوحة تحكم الشبكة الذكية</p>",
+        unsafe_allow_html=True
+    )
+
+    col1,col2 = st.columns(2)
+
+    with col1:
+        if st.button("📱 الأجهزة المتصلة"):
+            navigate("devices")
+
+    with col2:
+        if st.button("📊 نشاط الأجهزة"):
+            navigate("usage")
+
+# -----------------------------
+# صفحة الأجهزة
+# -----------------------------
+elif st.session_state.page == "devices":
+
+    st.title("📱 الأجهزة المتصلة بالشبكة")
+
+    devices = generate_devices()
+
+    df = pd.DataFrame(devices)
+
+    st.dataframe(df, use_container_width=True)
+
+    if st.button("🔙 العودة"):
+        navigate("main")
+
+# -----------------------------
+# صفحة النشاط
+# -----------------------------
+elif st.session_state.page == "usage":
+
+    st.title("📊 نشاط الأجهزة")
+
+    devices = generate_devices()
+
+    usage_data = []
+
+    for device in devices:
+
+        usage_data.append({
+            "اسم الجهاز": device["اسم الجهاز"],
+            "IP": device["IP"],
+            "النشاط الحالي": random.choice(activities),
+            "الموقع المستخدم": random.choice(websites),
+            "استهلاك الشبكة": random.choice([
+                "منخفض",
+                "متوسط",
+                "عالي",
+                "عالي جداً"
+            ])
+        })
+
+    usage_df = pd.DataFrame(usage_data)
 
     st.dataframe(
-        df,
+        usage_df,
         use_container_width=True
     )
 
-# --------------------------
-# معلومات إضافية
-# --------------------------
-st.markdown("""
-<div class='info-box'>
+    if st.button("🔙 العودة"):
+        navigate("main")
 
-<h3 style='color:#38bdf8;'>📡 ملاحظات مهمة</h3>
-
-<ul style='color:white;font-size:18px;'>
-
-<li>التطبيق يتغير حسب الجهاز والشبكة الحالية</li>
-
-<li>إذا دخلت شبكة ثانية سيتغير الـ IP تلقائياً</li>
-
-<li>Streamlit Cloud لا يسمح بفحص كل أجهزة الشبكة الداخلية</li>
-
-<li>لفحص الأجهزة الحقيقية بالكامل شغل التطبيق محلياً على الكمبيوتر</li>
-
-</ul>
-
-</div>
-""", unsafe_allow_html=True)
-
-# --------------------------
+# -----------------------------
 # الفوتر
-# --------------------------
+# -----------------------------
 st.markdown("""
 <div class='footer'>
 هذا التطبيق مصمم من أخوك عبد الله 🚀
