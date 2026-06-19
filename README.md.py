@@ -1,14 +1,26 @@
+import subprocess
+import sys
+
+# أوامر التثبيت التلقائي المضافة
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+for pkg in ["psutil", "streamlit", "plotly", "pandas"]:
+    try:
+        __import__(pkg)
+    except ImportError:
+        install(pkg)
+
+# الكود الأصلي الخاص بك
 import streamlit as st
 import pandas as pd
 import socket
 import uuid
-import subprocess
 import re
 import time
 import json
 import urllib.request
 from datetime import datetime
-
 import psutil
 import plotly.graph_objects as go
 
@@ -59,14 +71,12 @@ footer, #MainMenu { visibility:hidden; }
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-
 def human_bytes(n):
     for u in ["B", "KB", "MB", "GB", "TB"]:
         if abs(n) < 1024:
             return f"{n:.1f} {u}"
         n /= 1024
     return f"{n:.1f} PB"
-
 
 def get_local_info():
     hostname = socket.gethostname()
@@ -77,7 +87,6 @@ def get_local_info():
     mac = ':'.join(['{:02X}'.format((uuid.getnode() >> e) & 0xff)
                     for e in range(0, 8 * 6, 8)][::-1])
     return {"hostname": hostname, "ip": ip, "mac": mac}
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_public_info():
@@ -93,7 +102,6 @@ def get_public_info():
     except Exception:
         pass
     return {"ip": "غير متاح", "isp": "—", "city": "—", "country": "—", "lat": None, "lon": None}
-
 
 @st.cache_data(ttl=15, show_spinner=False)
 def measure_latency():
@@ -113,7 +121,6 @@ def measure_latency():
                         "ms": ms if ms else 999})
     return results
 
-
 def quality_label(ms):
     if ms is None or ms >= 999:
         return "غير متصل", "#f87171"
@@ -125,7 +132,6 @@ def quality_label(ms):
         return "متوسط", "#fbbf24"
     return "ضعيف", "#f87171"
 
-
 def device_icon(ip, kind):
     last = ip.rsplit(".", 1)[-1]
     if last in ("1", "254"):
@@ -134,14 +140,12 @@ def device_icon(ip, kind):
         return "💻"
     return "📱"
 
-
 DEMO_DEVICES = [
     {"IP": "192.168.1.1", "MAC": "AC:DE:48:00:11:22", "النوع": "ثابت", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.25", "MAC": "F1:A2:B3:C4:D5:E6", "النوع": "ديناميكي", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.12", "MAC": "A1:B2:C3:D4:E5:F6", "النوع": "ديناميكي", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.40", "MAC": "C8:D9:E0:F1:A2:B3", "النوع": "ثابت", "الحالة": "🟢 متصل"},
 ]
-
 
 @st.cache_data(ttl=20, show_spinner=False)
 def scan_arp_table():
@@ -161,7 +165,6 @@ def scan_arp_table():
         rows = DEMO_DEVICES
     return pd.DataFrame(rows)
 
-
 def get_interfaces():
     rows = []
     for name, s in psutil.net_if_stats().items():
@@ -172,12 +175,10 @@ def get_interfaces():
                      "الحالة": "🟢 فعّالة" if s.isup else "🔴 متوقفة"})
     return pd.DataFrame(rows)
 
-
 if "io_history" not in st.session_state:
     st.session_state.io_history = []
 if "last_io" not in st.session_state:
     st.session_state.last_io = None
-
 
 def update_history():
     cur = psutil.net_io_counters()
@@ -193,7 +194,6 @@ def update_history():
         {"time": datetime.now().strftime("%H:%M:%S"), "up": up, "down": down})
     st.session_state.io_history = st.session_state.io_history[-30:]
     return up, down
-
 
 local = get_local_info()
 
@@ -214,17 +214,14 @@ with st.sidebar:
                 unsafe_allow_html=True)
     auto = st.toggle("🔄 تحديث تلقائي (5 ثوانٍ)", value=False)
 
-
 def hero(title, sub):
     st.markdown(f"<div class='hero'><h1>{title}</h1><p>{sub}</p></div>", unsafe_allow_html=True)
-
 
 def kpi(col, icon, label, val, cls="", delta=""):
     extra = f"<div class='delta {cls}'>{delta}</div>" if delta else ""
     col.markdown(f"<div class='kpi'><span class='icon'>{icon}</span>"
                  f"<div class='label'>{label}</div><div class='value'>{val}</div>{extra}</div>",
                  unsafe_allow_html=True)
-
 
 def page_dashboard():
     lat = measure_latency()
@@ -276,7 +273,6 @@ def page_dashboard():
             st.plotly_chart(g, use_container_width=True, config={"displayModeBar": False})
         st.markdown("</div>", unsafe_allow_html=True)
 
-
 def page_devices():
     hero("📱 الأجهزة المتصلة", "قائمة الأجهزة المكتشفة على شبكتك المحلية")
     cur = pd.DataFrame([{"IP": local["ip"], "MAC": local["mac"],
@@ -305,7 +301,6 @@ def page_devices():
     st.markdown("<div class='card'><h3>🔌 واجهات الشبكة</h3>", unsafe_allow_html=True)
     st.dataframe(get_interfaces(), use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
 
 def page_usage():
     hero("📊 استخدام الشبكة", "تحليل حركة البيانات وتوزيع الاستخدام")
@@ -344,7 +339,6 @@ def page_usage():
             st.info("لا توجد بيانات كافية.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-
 def page_connection():
     hero("🌍 معلومات الاتصال", "عنوان IP العام والمزوّد وجودة الاتصال بالإنترنت")
     pub = get_public_info()
@@ -378,7 +372,6 @@ def page_connection():
             st.info("تعذّر تحديد الموقع الجغرافي.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-
 def page_settings():
     hero("⚙️ الإعدادات والمعلومات", "تفاصيل النظام")
     st.markdown("<div class='card'><h3>معلومات النظام</h3>", unsafe_allow_html=True)
@@ -392,7 +385,6 @@ def page_settings():
         {"المعلومة": "وقت الإقلاع", "القيمة": boot}])
     st.dataframe(info, use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
 
 if page.startswith("🏠"):
     page_dashboard()
