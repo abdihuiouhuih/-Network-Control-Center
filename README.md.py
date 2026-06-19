@@ -1,17 +1,9 @@
-import subprocess
-import sys
+import subprocess, sys
+for p in ['psutil', 'streamlit', 'pandas', 'plotly']: 
+    try: __import__(p)
+    except: subprocess.check_call([sys.executable, "-m", "pip", "install", p])
 
-# أوامر التثبيت التلقائي المضافة
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-for pkg in ["psutil", "streamlit", "plotly", "pandas"]:
-    try:
-        __import__(pkg)
-    except ImportError:
-        install(pkg)
-
-# الكود الأصلي الخاص بك
+# --- بداية كودك الأصلي (406 سطر) ---
 import streamlit as st
 import pandas as pd
 import socket
