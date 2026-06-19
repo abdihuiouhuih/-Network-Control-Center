@@ -5,39 +5,79 @@ import uuid
 import subprocess
 import re
 import time
+import json
+import urllib.request
 from datetime import datetime
 
 import psutil
 import plotly.graph_objects as go
 
-# ===== إعداد الصفحة =====
+# ================================================================
+# إعداد الصفحة
+# ================================================================
 st.set_page_config(page_title="مركز التحكم بالشبكة", page_icon="🌐",
                    layout="wide", initial_sidebar_state="expanded")
 
-# ===== التصميم =====
+# ================================================================
+# التصميم الاحترافي (RTL + ثيم داكن + حركات)
+# ================================================================
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap');
 html, body, [class*="css"] { font-family:'Cairo',sans-serif; }
 .stApp { background: radial-gradient(1200px 600px at 80% -10%, #0b2a4a 0%, transparent 55%),
          radial-gradient(900px 500px at 0% 0%, #102a43 0%, transparent 45%), #030712; direction:rtl; }
+
+/* الشريط العلوي */
+.topbar { display:flex; justify-content:space-between; align-items:center;
+          background:linear-gradient(135deg,rgba(56,189,248,.12),rgba(99,102,241,.10));
+          border:1px solid rgba(56,189,248,.25); border-radius:20px;
+          padding:16px 26px; margin-bottom:20px; box-shadow:0 10px 40px rgba(2,8,23,.6); }
+.topbar .brand { color:#f8fafc; font-size:26px; font-weight:900; }
+.topbar .brand small { color:#64748b; font-size:13px; font-weight:600; }
+.topbar .meta { color:#cbd5e1; font-size:14px; text-align:left; line-height:1.7; }
+.live { display:inline-flex; align-items:center; gap:8px; color:#4ade80; font-weight:700; }
+.dot { width:10px; height:10px; border-radius:50%; background:#4ade80;
+       box-shadow:0 0 0 0 rgba(74,222,128,.7); animation:pulse 1.8s infinite; }
+@keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(74,222,128,.7);}
+                   70%{box-shadow:0 0 0 12px rgba(74,222,128,0);}
+                   100%{box-shadow:0 0 0 0 rgba(74,222,128,0);} }
+
 .hero { background:linear-gradient(135deg,rgba(56,189,248,.12),rgba(99,102,241,.10));
-        border:1px solid rgba(56,189,248,.25); border-radius:22px; padding:26px 32px;
-        margin-bottom:22px; box-shadow:0 10px 40px rgba(2,8,23,.6); }
-.hero h1 { color:#f8fafc; font-size:40px; font-weight:800; margin:0; }
-.hero p { color:#94a3b8; font-size:17px; margin:6px 0 0 0; }
-.kpi { background:linear-gradient(160deg,#0f172a,#111827); border:1px solid rgba(148,163,184,.15);
-       border-radius:18px; padding:20px 22px; height:100%; transition:.25s;
-       box-shadow:0 6px 24px rgba(2,8,23,.45); }
-.kpi:hover { transform:translateY(-4px); border-color:rgba(56,189,248,.45); }
+        border:1px solid rgba(56,189,248,.25); border-radius:22px; padding:24px 30px;
+        margin-bottom:20px; }
+.hero h1 { color:#f8fafc; font-size:36px; font-weight:800; margin:0; }
+.hero p { color:#94a3b8; font-size:16px; margin:6px 0 0 0; }
+
+.kpi { position:relative; overflow:hidden; background:linear-gradient(160deg,#0f172a,#111827);
+       border:1px solid rgba(148,163,184,.15); border-radius:18px; padding:20px 22px;
+       height:100%; transition:.3s; box-shadow:0 6px 24px rgba(2,8,23,.45); }
+.kpi::after { content:""; position:absolute; top:0; right:0; width:120px; height:120px;
+       background:radial-gradient(circle, rgba(56,189,248,.18), transparent 70%);
+       transform:translate(40px,-40px); }
+.kpi:hover { transform:translateY(-5px); border-color:rgba(56,189,248,.5); }
 .kpi .label { color:#94a3b8; font-size:15px; font-weight:600; }
-.kpi .value { color:#f1f5f9; font-size:32px; font-weight:800; margin-top:6px; }
-.kpi .delta { font-size:14px; font-weight:600; margin-top:4px; }
-.kpi .icon { font-size:26px; float:left; opacity:.9; }
-.up { color:#4ade80; } .down { color:#f87171; }
+.kpi .value { color:#f1f5f9; font-size:30px; font-weight:800; margin-top:6px; }
+.kpi .delta { font-size:13px; font-weight:600; margin-top:4px; }
+.kpi .icon { font-size:24px; float:left; opacity:.9; }
+.up { color:#4ade80; } .down { color:#f87171; } .warn { color:#fbbf24; }
+
 .card { background:rgba(15,23,42,.65); border:1px solid rgba(148,163,184,.14);
         border-radius:18px; padding:18px 22px; margin-bottom:16px; backdrop-filter:blur(6px); }
-.card h3 { color:#e2e8f0; font-size:20px; font-weight:700; margin:0 0 12px 0; }
+.card h3 { color:#e2e8f0; font-size:19px; font-weight:700; margin:0 0 12px 0; }
+
+/* بطاقة جهاز */
+.dev { display:flex; align-items:center; gap:14px; background:linear-gradient(160deg,#0f172a,#0b1220);
+       border:1px solid rgba(148,163,184,.14); border-radius:14px; padding:14px 16px;
+       margin-bottom:10px; transition:.25s; }
+.dev:hover { border-color:rgba(56,189,248,.5); transform:translateX(-4px); }
+.dev .ic { font-size:30px; width:50px; height:50px; display:flex; align-items:center;
+       justify-content:center; background:rgba(56,189,248,.1); border-radius:12px; }
+.dev .info { flex:1; }
+.dev .name { color:#f1f5f9; font-weight:700; font-size:16px; }
+.dev .sub { color:#64748b; font-size:13px; direction:ltr; text-align:right; }
+.dev .st { color:#4ade80; font-size:13px; font-weight:700; }
+
 [data-testid="stDataFrame"] { direction:ltr; }
 [data-testid="stSidebar"] { background:linear-gradient(180deg,#0b1220,#030712);
         border-left:1px solid rgba(56,189,248,.18); }
@@ -50,6 +90,9 @@ footer, #MainMenu { visibility:hidden; }
 """, unsafe_allow_html=True)
 
 
+# ================================================================
+# دوال مساعدة
+# ================================================================
 def human_bytes(n):
     for u in ["B", "KB", "MB", "GB", "TB"]:
         if abs(n) < 1024:
@@ -69,7 +112,66 @@ def get_local_info():
     return {"hostname": hostname, "ip": ip, "mac": mac}
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_public_info():
+    """معلومات IP العام والمزوّد والموقع الجغرافي."""
+    try:
+        req = urllib.request.Request(
+            "http://ip-api.com/json/?fields=status,country,city,isp,query,lat,lon",
+            headers={"User-Agent": "Mozilla/5.0"})
+        data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        if data.get("status") == "success":
+            return {"ip": data.get("query", "—"), "isp": data.get("isp", "—"),
+                    "city": data.get("city", "—"), "country": data.get("country", "—"),
+                    "lat": data.get("lat"), "lon": data.get("lon")}
+    except Exception:
+        pass
+    return {"ip": "غير متاح", "isp": "—", "city": "—", "country": "—", "lat": None, "lon": None}
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def measure_latency():
+    """قياس زمن الاستجابة (ms) لخوادم معروفة لتقييم جودة الاتصال."""
+    targets = [("Google", "8.8.8.8", 53), ("Cloudflare", "1.1.1.1", 53)]
+    results = []
+    for name, host, port in targets:
+        t0 = time.time()
+        ok = True
+        try:
+            s = socket.create_connection((host, port), timeout=2)
+            s.close()
+        except Exception:
+            ok = False
+        ms = (time.time() - t0) * 1000 if ok else None
+        results.append({"الخادم": name, "العنوان": host,
+                        "الاستجابة": f"{ms:.0f} ms" if ms else "—",
+                        "_ms": ms if ms else 999})
+    return results
+
+
+def quality_label(ms):
+    if ms is None or ms >= 999:
+        return "غير متصل", "#f87171"
+    if ms < 30:
+        return "ممتاز", "#4ade80"
+    if ms < 80:
+        return "جيد", "#38bdf8"
+    if ms < 150:
+        return "متوسط", "#fbbf24"
+    return "ضعيف", "#f87171"
+
+
+def device_icon(ip, mac, kind):
+    last = ip.rsplit(".", 1)[-1]
+    if last in ("1", "254"):
+        return "📡"           # راوتر / بوابة
+    if kind == "هذا الجهاز":
+        return "💻"
+    return "📱"
+
+
 DEMO_DEVICES = [
+    {"IP": "192.168.1.1", "MAC": "AC:DE:48:00:11:22", "النوع": "ثابت", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.25", "MAC": "F1:A2:B3:C4:D5:E6", "النوع": "ديناميكي", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.12", "MAC": "A1:B2:C3:D4:E5:F6", "النوع": "ديناميكي", "الحالة": "🟢 متصل"},
     {"IP": "192.168.1.40", "MAC": "C8:D9:E0:F1:A2:B3", "النوع": "ثابت", "الحالة": "🟢 متصل"},
@@ -90,7 +192,7 @@ def scan_arp_table():
                          "الحالة": "🟢 متصل"})
     except Exception:
         pass
-    if not rows:                       # بيانات احتياطية للسحابة
+    if not rows:
         rows = DEMO_DEVICES
     return pd.DataFrame(rows)
 
@@ -128,7 +230,30 @@ def update_history():
     return up, down
 
 
+# ================================================================
+# الشريط العلوي
+# ================================================================
 local = get_local_info()
+
+
+def top_bar():
+    lat = measure_latency()
+    best = min((r["_ms"] for r in lat), default=999)
+    qlabel, qcolor = quality_label(best)
+    st.markdown(f"""
+    <div class="topbar">
+        <div class="brand">🌐 مركز التحكم بالشبكة <small>Network Control Center</small></div>
+        <div class="meta">
+            <span class="live"><span class="dot"></span> النظام يعمل</span> &nbsp;|&nbsp;
+            <span style="color:{qcolor};font-weight:700">جودة الاتصال: {qlabel} ({best:.0f}ms)</span><br>
+            🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp; 🖥️ {local['hostname']}
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ================================================================
+# الشريط الجانبي
+# ================================================================
 with st.sidebar:
     st.markdown(f"""
     <div style="text-align:center;padding:10px 0 18px">
@@ -137,7 +262,8 @@ with st.sidebar:
         <div style="color:#64748b;font-size:13px">Network Control Center</div>
     </div>""", unsafe_allow_html=True)
     page = st.radio("التنقّل",
-                    ["🏠 لوحة القيادة", "📱 الأجهزة المتصلة", "📊 استخدام الشبكة", "⚙️ الإعدادات"],
+                    ["🏠 لوحة القيادة", "📱 الأجهزة المتصلة", "📊 استخدام الشبكة",
+                     "🌍 معلومات الاتصال", "⚙️ الإعدادات"],
                     label_visibility="collapsed")
     st.divider()
     st.markdown(f"""
@@ -148,10 +274,11 @@ with st.sidebar:
     auto = st.toggle("🔄 تحديث تلقائي (5 ثوانٍ)", value=False)
 
 
+# ================================================================
+# الصفحات
+# ================================================================
 def page_dashboard():
-    st.markdown('<div class="hero"><h1>🌐 لوحة القيادة</h1>'
-                '<p>نظرة عامة فورية على حالة الشبكة والأجهزة وحركة البيانات</p></div>',
-                unsafe_allow_html=True)
+    top_bar()
     up, down = update_history()
     io = psutil.net_io_counters()
     n = len(scan_arp_table()) + 1
@@ -189,11 +316,11 @@ def page_dashboard():
         for label, val, color in [("المعالج CPU", psutil.cpu_percent(), "#38bdf8"),
                                    ("الذاكرة RAM", psutil.virtual_memory().percent, "#a78bfa")]:
             g = go.Figure(go.Indicator(mode="gauge+number", value=val,
-                          number={"suffix": "%", "font": {"color": "#f1f5f9", "size": 26}},
+                          number={"suffix": "%", "font": {"color": "#f1f5f9", "size": 24}},
                           gauge={"axis": {"range": [0, 100], "tickcolor": "#475569"},
                                  "bar": {"color": color}, "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0},
-                          title={"text": label, "font": {"color": "#94a3b8", "size": 14}}))
-            g.update_layout(height=160, margin=dict(l=10, r=10, t=30, b=0),
+                          title={"text": label, "font": {"color": "#94a3b8", "size": 13}}))
+            g.update_layout(height=150, margin=dict(l=10, r=10, t=28, b=0),
                             paper_bgcolor="rgba(0,0,0,0)")
             st.plotly_chart(g, use_container_width=True, config={"displayModeBar": False})
         st.markdown("</div>", unsafe_allow_html=True)
@@ -205,13 +332,24 @@ def page_devices():
     cur = pd.DataFrame([{"IP": local["ip"], "MAC": local["mac"],
                          "النوع": "هذا الجهاز", "الحالة": "🟢 متصل"}])
     full = pd.concat([cur, scan_arp_table()], ignore_index=True)
-    _, c2 = st.columns([3, 1])
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        q = st.text_input("🔍 بحث (IP أو MAC)", "", label_visibility="collapsed",
+                          placeholder="🔍 ابحث بعنوان IP أو MAC")
     with c2:
         if st.button("🔄 إعادة الفحص"):
             scan_arp_table.clear()
             st.rerun()
+    if q:
+        full = full[full.apply(lambda r: q.lower() in str(r["IP"]).lower()
+                               or q.lower() in str(r["MAC"]).lower(), axis=1)]
     st.markdown(f'<div class="card"><h3>عدد الأجهزة: {len(full)}</h3>', unsafe_allow_html=True)
-    st.dataframe(full, use_container_width=True, hide_index=True)
+    for _, r in full.iterrows():
+        ic = device_icon(r["IP"], r["MAC"], r["النوع"])
+        st.markdown(f"""<div class="dev"><div class="ic">{ic}</div>
+            <div class="info"><div class="name">{r['IP']}</div>
+            <div class="sub">{r['MAC']} • {r['النوع']}</div></div>
+            <div class="st">{r['الحالة']}</div></div>""", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown('<div class="card"><h3>🔌 واجهات الشبكة</h3>', unsafe_allow_html=True)
     st.dataframe(get_interfaces(), use_container_width=True, hide_index=True)
@@ -261,6 +399,45 @@ def page_usage():
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+def page_connection():
+    st.markdown('<div class="hero"><h1>🌍 معلومات الاتصال</h1>'
+                '<p>عنوان IP العام والمزوّد وجودة الاتصال بالإنترنت</p></div>', unsafe_allow_html=True)
+    pub = get_public_info()
+    cols = st.columns(4)
+    for col, (icon, label, val) in zip(cols, [
+            ("🌐", "IP العام", pub["ip"]),
+            ("🏢", "مزوّد الخدمة", pub["isp"]),
+            ("📍", "المدينة", pub["city"]),
+            ("🗺️", "الدولة", pub["country"])]):
+        col.markdown(f'<div class="kpi"><span class="icon">{icon}</span>'
+                     f'<div class="label">{label}</div>'
+                     f'<div class="value" style="font-size:20px">{val}</div></div>',
+                     unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    L, R = st.columns([1, 1])
+    with L:
+        st.markdown('<div class="card"><h3>⚡ اختبار جودة الاتصال (Latency)</h3>', unsafe_allow_html=True)
+        if st.button("🚀 إعادة الاختبار"):
+            measure_latency.clear()
+            st.rerun()
+        for r in measure_latency():
+            ql, qc = quality_label(r["_ms"])
+            st.markdown(f"""<div class="dev"><div class="ic">⚡</div>
+                <div class="info"><div class="name">{r['الخادم']}</div>
+                <div class="sub">{r['العنوان']}</div></div>
+                <div style="text-align:left"><div style="color:{qc};font-weight:800;font-size:18px">{r['الاستجابة']}</div>
+                <div style="color:{qc};font-size:12px">{ql}</div></div></div>""",
+                unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with R:
+        st.markdown('<div class="card"><h3>📍 الموقع التقريبي</h3>', unsafe_allow_html=True)
+        if pub["lat"] and pub["lon"]:
+            st.map(pd.DataFrame([{"lat": pub["lat"], "lon": pub["lon"]}]), zoom=9)
+        else:
+            st.info("تعذّر تحديد الموقع الجغرافي.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 def page_settings():
     st.markdown('<div class="hero"><h1>⚙️ الإعدادات والمعلومات</h1>'
                 '<p>تفاصيل النظام</p></div>', unsafe_allow_html=True)
@@ -277,12 +454,17 @@ def page_settings():
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+# ================================================================
+# التوجيه
+# ================================================================
 if page.startswith("🏠"):
     page_dashboard()
 elif page.startswith("📱"):
     page_devices()
 elif page.startswith("📊"):
     page_usage()
+elif page.startswith("🌍"):
+    page_connection()
 else:
     page_settings()
 
