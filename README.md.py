@@ -28,10 +28,10 @@ st.markdown("""
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 'home'
 
-# دالة لتفريغ المحادثة الحالية مع تحديث الرسالة الترحيبية المطلوبة
+# دالة لتفريغ المحادثة الحالية مع تحديث الرسالة الترحيبية المطلوبة باسم "منصة التطوير الذاتي الشاملة"
 def reset_ai_messages():
     st.session_state.ai_messages = [
-        {"role": "assistant", "content": "مرحباً بك! أنا الذكاء الاصطناعي الخاص بمنصة التطوير الذاتي الشامل. كيف يمكنني خدمتك اليوم؟"}
+        {"role": "assistant", "content": "مرحباً بك! أنا الذكاء الاصطناعي الخاص بـ منصة التطوير الذاتي الشاملة. كيف يمكنني خدمتك اليوم؟"}
     ]
 
 # تخزين محادثات الذكاء الاصطناعي في الذاكرة المؤقتة (Session State) فقط بدون أي قواعد بيانات
@@ -43,7 +43,7 @@ def navigate_to(page):
 
 st.markdown('<div class="footer-text">حقوق التطوير محفوظة لـ عبد الله © 2026</div>', unsafe_allow_html=True)
 
-# --- 1. الشاشة الرئيسية (4 خيارات الآن) ---
+# --- 1. الشاشة الرئيسية ---
 if st.session_state.current_page == 'home':
     st.markdown("<h1 style='text-align: center; color: #ffffff;'>🚀 منصة التطوير الذاتي الشاملة</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #768390;'>نظام ذكي تفاعلي لتحسين جودة حياتك اليومية ومساعدتك في كل استفساراتك</p>", unsafe_allow_html=True)
@@ -68,7 +68,7 @@ if st.session_state.current_page == 'home':
             navigate_to('study')
             st.rerun()
 
-        st.markdown('<div class="card"><h2>🤖 الذكاء الاصطناعي الخاص بـ المنصة الشاملة للتطوير الذاتي</h2><p>مساعد ذكي يرد على كافة استفساراتك ويشرح لك محتويات وأقسام الموقع فوراً</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><h2>🤖 منصة التطوير الذاتي الشاملة</h2><p>مساعد ذكي يرد على كافة استفساراتك ويشرح لك محتويات وأقسام الموقع فوراً</p></div>', unsafe_allow_html=True)
         if st.button("دخول الذكاء الاصطناعي", key="btn_ai"): 
             navigate_to('ai_chat')
             st.rerun()
@@ -189,9 +189,9 @@ elif st.session_state.current_page == 'study':
     for gs in random.sample(general_study, 2):
         st.markdown(f"<div class='advice-box'>{gs}</div>", unsafe_allow_html=True)
 
-# --- 5. صفحة الذكاء الاصطناعي الخاص بالمنصة ---
+# --- 5. صفحة الذكاء الاصطناعي (منصة التطوير الذاتي الشاملة) ---
 elif st.session_state.current_page == 'ai_chat':
-    st.title("🤖 الذكاء الاصطناعي الخاص بـ المنصة الشاملة للتطوير الذاتي")
+    st.title("🤖 منصة التطوير الذاتي الشاملة")
     st.markdown("اسألني عن أي شيء في الموقع، وسأقوم بشرحه لك أو مساعدتك في استخدامه فوراً!")
     
     # صف أزرار للتحكم (العودة + زر مسح الرسائل)
@@ -228,7 +228,7 @@ elif st.session_state.current_page == 'ai_chat':
         elif "دراسي" in query_lower or "تخصص" in query_lower or "دراسة" in query_lower:
             ai_reply = "📚 **التحدي الدراسي (مركز التميز الأكاديمي):** يوفر خطط عمل احترافية ونصحية مخصصة لـ 12 تخصصاً أكاديمياً مختلفاً (مثل الأمن السيبراني، الذكاء الاصطناعي، الطب، الهندسة، وغيرها) لمساعدتك على التفوق."
         elif "من هي" in query_lower or "من أنت" in query_lower or "موقع" in query_lower:
-            ai_reply = "هذه **المنصة الشاملة للتطوير الذاتي** المطورة بواسطة عبد الله © 2026، وهي مصممة خصيصاً لمساعدتك على الارتقاء بحياتك صحياً، نفسياً، وأكاديمياً بكل سهولة."
+            ai_reply = "هذه **منصة التطوير الذاتي الشاملة** المطورة بواسطة عبد الله © 2026، وهي مصممة خصيصاً لمساعدتك على الارتقاء بحياتك صحياً، نفسياً، وأكاديمياً بكل سهولة."
         else:
             ai_reply = f"أهلاً بك! لقد فهمت استفسارك حول ({user_query}). في منصتنا الشاملة، يمكنك الانتقال لأي قسم (التحدي الرياضي، تحدي العادات، أو التحدي الدراسي) من الشاشة الرئيسية، وكل قسم يقدم أدوات تفاعلية مخصصة. هل تود مني أن أشرح لك تفاصيل أي قسم بشكل أعمق؟"
             
