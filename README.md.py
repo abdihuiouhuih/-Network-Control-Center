@@ -440,8 +440,20 @@ def init_db():
     # -----------------------------------------------------
     # Initial company accounts (PINs are stored as hashes)
     # -----------------------------------------------------
+    # IMPORTANT: these are bootstrap accounts only.
+    # Older versions used to recreate a missing account on every startup.
+    # That meant an account deleted from the administration panel could
+    # come back automatically. We now record that the bootstrap step has
+    # already happened, so deletion is permanent.
     def pin_hash(pin):
         return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
 
     seed_accounts = [
         ("ناصر علي", "manager", "5321"),
@@ -451,23 +463,34 @@ def init_db():
         ("فهد", "employee", "8257"),
     ]
 
-    for name, role_name, pin in seed_accounts:
-        existing = cursor.execute(
-            "SELECT id, rep_id FROM users WHERE name = ?", (name,)
-        ).fetchone()
-        if existing is None:
-            rep_id_for_user = None
-            if role_name == "employee":
-                rep = cursor.execute("SELECT id FROM reps WHERE name = ?", (name,)).fetchone()
-                if rep is None:
-                    cursor.execute("INSERT INTO reps(name, phone) VALUES (?, NULL)", (name,))
-                    rep_id_for_user = cursor.lastrowid
-                else:
-                    rep_id_for_user = rep[0]
-            cursor.execute(
-                "INSERT INTO users(name, role, pin_hash, rep_id) VALUES (?, ?, ?, ?)",
-                (name, role_name, pin_hash(pin), rep_id_for_user),
-            )
+    bootstrap_done = cursor.execute(
+        "SELECT value FROM system_settings WHERE key = 'initial_company_accounts_seeded'"
+    ).fetchone()
+
+    if bootstrap_done is None:
+        existing_user_count = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        # Fresh database: create the original company accounts once.
+        # Existing database: do NOT recreate missing accounts. This preserves
+        # deletions made by the administrator in older versions.
+        if existing_user_count == 0:
+            for name, role_name, pin in seed_accounts:
+                rep_id_for_user = None
+                if role_name == "employee":
+                    rep = cursor.execute("SELECT id FROM reps WHERE name = ?", (name,)).fetchone()
+                    if rep is None:
+                        cursor.execute("INSERT INTO reps(name, phone) VALUES (?, NULL)", (name,))
+                        rep_id_for_user = cursor.lastrowid
+                    else:
+                        rep_id_for_user = rep[0]
+                cursor.execute(
+                    "INSERT INTO users(name, role, pin_hash, rep_id) VALUES (?, ?, ?, ?)",
+                    (name, role_name, pin_hash(pin), rep_id_for_user),
+                )
+
+        cursor.execute(
+            "INSERT INTO system_settings(key, value) VALUES ('initial_company_accounts_seeded', '1')"
+        )
 
     conn.commit()
     conn.close()
