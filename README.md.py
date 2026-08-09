@@ -3,8 +3,26 @@ import pandas as pd
 import sqlite3
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from io import BytesIO
 import hashlib
 import secrets
+
+try:
+    import cv2
+    import numpy as np
+except Exception:
+    cv2 = None
+    np = None
+
+try:
+    import zxingcpp
+except Exception:
+    zxingcpp = None
+
+try:
+    from docx import Document
+except Exception:
+    Document = None
 
 # =========================================================
 # CONFIGURATION
@@ -257,6 +275,71 @@ def init_db():
     )
 
     # -----------------------------------------------------
+    # Company workflow migrations
+    # -----------------------------------------------------
+    def add_column_if_missing(table, column, definition):
+        cols = [r[1] for r in cursor.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in cols:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    add_column_if_missing("customers", "phone", "TEXT")
+    add_column_if_missing("customers", "notes", "TEXT")
+    add_column_if_missing("products", "unit_price", "REAL DEFAULT 0")
+    add_column_if_missing("products", "barcode", "TEXT")
+    add_column_if_missing("orders", "invoice_barcode", "TEXT")
+    add_column_if_missing("orders", "barcode_image_path", "TEXT")
+    add_column_if_missing("orders", "total_amount", "REAL DEFAULT 0")
+    add_column_if_missing("order_items", "unit_price", "REAL DEFAULT 0")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rep_id INTEGER NOT NULL,
+            week_start TEXT NOT NULL,
+            week_end TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT,
+            file_path TEXT NOT NULL,
+            status TEXT DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+            manager_note TEXT,
+            reviewed_by INTEGER,
+            reviewed_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(rep_id, week_start, week_end),
+            FOREIGN KEY(rep_id) REFERENCES reps(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rep_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            movement_type TEXT NOT NULL,
+            qty REAL NOT NULL,
+            reference TEXT,
+            image_path TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(rep_id) REFERENCES reps(id),
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        )
+    """)
+
+    # Convert the previous generic demo catalog to paper-company products.
+    old_demo = cursor.execute("SELECT COUNT(*) FROM products WHERE sku IN ('SKU-001','SKU-002','SKU-003','SKU-004')").fetchone()[0]
+    if old_demo == 4:
+        cursor.execute("DELETE FROM products")
+        cursor.executemany("""
+            INSERT INTO products(sku,name,category,min_stock,dormant_days,unit_price,barcode)
+            VALUES (?,?,?,?,?,?,?)
+        """, [
+            ("PAPER-A4-80", "ورق A4 80 جرام - كرتون", "ورق", 5, 30, 85.0, "6281000000011"),
+            ("PAPER-A3-80", "ورق A3 80 جرام - كرتون", "ورق", 3, 30, 125.0, "6281000000012"),
+            ("PAPER-A4-70", "ورق A4 70 جرام - كرتون", "ورق", 5, 30, 78.0, "6281000000013"),
+            ("PAPER-COLOR", "ورق ملون - كرتون", "ورق", 2, 45, 110.0, "6281000000014"),
+        ])
+
+    # -----------------------------------------------------
     # Demo data
     # -----------------------------------------------------
 
@@ -293,14 +376,14 @@ def init_db():
         cursor.executemany(
             """
             INSERT INTO products
-            (sku, name, category, min_stock, dormant_days)
-            VALUES (?, ?, ?, ?, ?)
+            (sku, name, category, min_stock, dormant_days, unit_price, barcode)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                ("SKU-001", "صنف تجريبي 1", "مشروبات", 10, 30),
-                ("SKU-002", "صنف تجريبي 2", "أغذية", 5, 21),
-                ("SKU-003", "صنف تجريبي 3", "عناية", 8, 30),
-                ("SKU-004", "صنف تجريبي 4", "منزلية", 5, 45),
+                ("PAPER-A4-80", "ورق A4 80 جرام - كرتون", "ورق", 5, 30, 85.0, "6281000000011"),
+                ("PAPER-A3-80", "ورق A3 80 جرام - كرتون", "ورق", 3, 30, 125.0, "6281000000012"),
+                ("PAPER-A4-70", "ورق A4 70 جرام - كرتون", "ورق", 5, 30, 78.0, "6281000000013"),
+                ("PAPER-COLOR", "ورق ملون - كرتون", "ورق", 2, 45, 110.0, "6281000000014"),
             ],
         )
 
@@ -479,6 +562,69 @@ def save_upload(uploaded_file, prefix):
     return str(path)
 
 
+def decode_barcode(uploaded_file):
+    """Decode common barcodes/QRs from a camera image when supported."""
+    if uploaded_file is None or cv2 is None or np is None:
+        return None, "تعذر القراءة التلقائية؛ اكتب الباركود يدوياً."
+    try:
+        data = np.frombuffer(uploaded_file.getvalue(), dtype=np.uint8)
+        image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if image is None:
+            return None, "الصورة غير صالحة."
+        if zxingcpp is not None:
+            results = zxingcpp.read_barcodes(image)
+            for result in results:
+                if result.text:
+                    return result.text, str(getattr(result, "format", "BARCODE"))
+        detector = cv2.QRCodeDetector()
+        value, _, _ = detector.detectAndDecode(image)
+        if value:
+            return value, "QR"
+        return None, "لم يتم العثور على باركود واضح."
+    except Exception as exc:
+        return None, f"تعذر تحليل الصورة: {exc}"
+
+
+def make_weekly_report_template(rep_name, week_start, week_end):
+    if Document is None:
+        return None
+    doc = Document()
+    doc.add_heading("التقرير الأسبوعي للمندوب", level=1)
+    doc.add_paragraph(f"الموظف: {rep_name}")
+    doc.add_paragraph(f"الأسبوع: {week_start} إلى {week_end}")
+    for heading in [
+        "1. ملخص العمل خلال الأسبوع",
+        "2. العملاء والزيارات",
+        "3. المبيعات والفواتير",
+        "4. حركة صناديق الورق والمخزون",
+        "5. التحصيل",
+        "6. المشاكل والملاحظات",
+        "7. خطة الأسبوع القادم",
+    ]:
+        doc.add_heading(heading, level=2)
+        doc.add_paragraph("اكتب التفاصيل هنا...")
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def file_bytes(path):
+    try:
+        p = Path(str(path))
+        return p.read_bytes() if p.exists() else None
+    except Exception:
+        return None
+
+
+def role_is_admin(role):
+    return role in {"manager", "deputy"}
+
+
+def manager_only():
+    return st.session_state.get("user", {}).get("role") == "manager"
+
+
 def format_number(value):
 
     try:
@@ -556,6 +702,7 @@ else:
         "⚠️ الأصناف الراكدة",
         "📥 التقارير والتصدير",
         "👁️ سجل نشاط الموظفين",
+        "👤 ملف الموظف الكامل",
         "🔐 إدارة الحسابات والصلاحيات",
     ]
 
@@ -569,7 +716,7 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 
 st.sidebar.caption(
-    "SalesFlow v1.0"
+    "SalesFlow v2.0 • شركة أوراق"
 )
 
 # =========================================================
@@ -664,6 +811,17 @@ if page == "🏠 لوحة المندوب":
         sales.iloc[0]["qty"]
     )
 
+    sales_money = query("""
+        SELECT COALESCE(SUM(oi.qty * COALESCE(oi.unit_price, p.unit_price, 0)),0) AS amount
+        FROM orders o
+        JOIN order_items oi ON oi.order_id=o.id
+        JOIN products p ON p.id=oi.product_id
+        WHERE o.rep_id=? AND substr(o.order_date,1,7)=?
+    """, (rep_id, month))
+    sales_money_value = float(sales_money.iloc[0]["amount"])
+    customer_count = query("SELECT COUNT(*) AS count FROM customers WHERE rep_id=? AND active=1", (rep_id,))
+    invoice_count = query("SELECT COUNT(*) AS count FROM orders WHERE rep_id=? AND substr(order_date,1,7)=?", (rep_id, month))
+
     collection_value = float(
         collections.iloc[0]["amount"]
     )
@@ -678,43 +836,13 @@ if page == "🏠 لوحة المندوب":
         else 0
     )
 
-    cols = st.columns(4)
-
-    with cols[0]:
-
-        kpi(
-            "زيارات اليوم",
-            format_number(
-                visits.iloc[0]["count"]
-            ),
-            "زيارة مسجلة",
-        )
-
-    with cols[1]:
-
-        kpi(
-            "Sell-in هذا الشهر",
-            format_number(
-                sales_value
-            ),
-            "كمية الأوردرات",
-        )
-
-    with cols[2]:
-
-        kpi(
-            "التحصيل",
-            f"{collection_value:,.0f}",
-            "خلال الشهر",
-        )
-
-    with cols[3]:
-
-        kpi(
-            "تحقيق التارجت",
-            f"{achievement:.1f}%",
-            f"الهدف {target_value:,.0f}",
-        )
+    cols = st.columns(5)
+    with cols[0]: kpi("عملائي", format_number(customer_count.iloc[0]["count"]), "عملاء نشطون")
+    with cols[1]: kpi("زيارات اليوم", format_number(visits.iloc[0]["count"]), "زيارة مسجلة")
+    with cols[2]: kpi("المبيعات", f"{sales_money_value:,.0f}", "قيمة مبيعات الشهر")
+    with cols[3]: kpi("الفواتير", format_number(invoice_count.iloc[0]["count"]), "هذا الشهر")
+    with cols[4]: kpi("التحصيل", f"{collection_value:,.0f}", "خلال الشهر")
+    st.info("المبيعات هنا هي قيمة الفواتير حسب أسعار الأصناف المسجلة، وليست راتب الموظف أو عمولته.")
 
     st.markdown("### 📈 مستوى تحقيق التارجت")
 
@@ -815,9 +943,23 @@ if page == "🏠 لوحة المندوب":
 
 elif page == "👥 العملاء والزيارات":
 
-    st.markdown(
-        "## 👥 زيارة العميل وحصر المخزون"
-    )
+    st.markdown("## 👥 العملاء والزيارات")
+
+    with st.expander("➕ إضافة عميل جديد", expanded=True):
+        with st.form("employee_add_customer"):
+            new_customer_name = st.text_input("اسم العميل")
+            new_customer_phone = st.text_input("رقم جوال العميل")
+            new_customer_area = st.text_input("المدينة / المنطقة")
+            new_customer_notes = st.text_area("ملاحظات العميل")
+            add_customer = st.form_submit_button("إضافة العميل", use_container_width=True)
+            if add_customer:
+                if not new_customer_name.strip() or not new_customer_phone.strip():
+                    st.error("اسم العميل ورقم الجوال مطلوبان.")
+                else:
+                    execute("INSERT INTO customers(name,area,rep_id,phone,notes) VALUES (?,?,?,?,?)", (new_customer_name.strip(), new_customer_area.strip(), rep_id, new_customer_phone.strip(), new_customer_notes.strip()))
+                    log_activity("إضافة عميل", f"أضاف العميل {new_customer_name.strip()} برقم {new_customer_phone.strip()}")
+                    st.success("تمت إضافة العميل وربطه بحسابك.")
+                    st.rerun()
 
     customers = query(
         """
@@ -1111,9 +1253,16 @@ elif page == "🧾 تسجيل أوردر":
             ].iloc[0]
         )
 
-        invoice_number = st.text_input(
-            "رقم الفاتورة / الأوردر"
-        )
+        invoice_number = st.text_input("رقم الفاتورة / الأوردر")
+        barcode_camera = st.camera_input("📷 صوّر باركود الفاتورة")
+        barcode_code = st.text_input("باركود الفاتورة (يمكن كتابته يدوياً)")
+        if barcode_camera is not None and not barcode_code.strip():
+            decoded, fmt = decode_barcode(barcode_camera)
+            if decoded:
+                barcode_code = decoded
+                st.success(f"تمت قراءة الباركود: {decoded} ({fmt})")
+            else:
+                st.warning("لم تتم قراءة الباركود من الصورة. اكتب الرقم يدوياً إذا لزم.")
 
         invoice_image = st.file_uploader(
             "📷 صورة الفاتورة",
@@ -1246,50 +1395,35 @@ elif page == "🧾 تسجيل أوردر":
 
                 else:
 
-                    image_path = save_upload(
-                        invoice_image,
-                        "invoice",
-                    )
+                    image_path = save_upload(invoice_image, "invoice")
+                    barcode_image_path = save_upload(barcode_camera, "invoice_barcode")
+
+                    total_amount = 0.0
+                    for product_id, qty in selected_items.items():
+                        row_price = products.loc[products["id"] == product_id, "unit_price"]
+                        unit_price = float(row_price.iloc[0]) if len(row_price) and pd.notna(row_price.iloc[0]) else 0.0
+                        total_amount += qty * unit_price
 
                     order_id = execute(
                         """
-                        INSERT INTO orders
-                        (
-                            rep_id,
-                            customer_id,
-                            order_date,
-                            invoice_no,
-                            image_path
-                        )
-
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO orders(rep_id,customer_id,order_date,invoice_no,image_path,invoice_barcode,barcode_image_path,total_amount)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            rep_id,
-                            customer_id,
-                            date.today().isoformat(),
-                            invoice_number,
-                            image_path,
-                        ),
+                        (rep_id, customer_id, date.today().isoformat(), invoice_number, image_path, barcode_code.strip(), barcode_image_path, total_amount),
                     )
 
                     for product_id, qty in selected_items.items():
 
                         execute(
                             """
-                            INSERT INTO order_items
-                            (
-                                order_id,
-                                product_id,
-                                qty
-                            )
-
-                            VALUES (?, ?, ?)
+                            INSERT INTO order_items(order_id,product_id,qty,unit_price)
+                            VALUES (?, ?, ?, ?)
                             """,
                             (
                                 order_id,
                                 product_id,
                                 qty,
+                                float(products.loc[products["id"] == product_id, "unit_price"].iloc[0]) if pd.notna(products.loc[products["id"] == product_id, "unit_price"].iloc[0]) else 0.0,
                             ),
                         )
 
@@ -1321,9 +1455,10 @@ elif page == "🧾 تسجيل أوردر":
                             ),
                         )
 
-                    st.success(
-                        "تم اعتماد الأوردر وخصم الكمية من مخزون المندوب."
-                    )
+                    for product_id, qty in selected_items.items():
+                        execute("INSERT INTO stock_movements(rep_id,product_id,movement_type,qty,reference) VALUES (?,?,?,?,?)", (rep_id, product_id, "بيع", qty, f"فاتورة {invoice_number.strip() or order_id}"))
+                    log_activity("تسجيل بيع", f"فاتورة {invoice_number.strip() or order_id} - قيمة المبيعات {total_amount:,.2f}")
+                    st.success("تم اعتماد الأوردر وخصم الكمية من مخزون المندوب.")
 
 
 # =========================================================
@@ -1479,9 +1614,9 @@ elif page == "📦 مخزون المندوب":
             ),
         )
 
-        st.success(
-            "تم تحديث مخزون المندوب."
-        )
+        execute("INSERT INTO stock_movements(rep_id,product_id,movement_type,qty,reference) VALUES (?,?,?,?,?)", (rep_id, product_id, "إضافة مخزون", quantity, "إضافة من الموظف"))
+        log_activity("تحديث مخزون", f"الصنف {product_name} - الكمية {quantity:g}")
+        st.success("تم تحديث مخزون المندوب.")
 
 
 # =========================================================
@@ -1608,10 +1743,43 @@ elif page == "💰 التحصيل":
 
 elif page == "📊 تقارير المندوب":
 
-    st.markdown(
-        "## 📊 تقارير المندوب"
-    )
+    st.markdown("## 📊 تقارير المندوب")
+    st.markdown("### 📝 التقرير الأسبوعي")
+    this_monday = date.today() - timedelta(days=date.today().weekday())
 
+    with st.expander("➕ إضافة تقرير أسبوعي", expanded=True):
+        template = make_weekly_report_template(current_user["name"], this_monday.isoformat(), (this_monday + timedelta(days=6)).isoformat())
+        st.download_button("📄 تحميل نموذج Word", data=template or b"", file_name=f"نموذج_تقرير_{current_user['name']}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", disabled=template is None)
+        week_input = st.date_input("بداية الأسبوع", this_monday, key="week_report_start")
+        week_start = week_input - timedelta(days=week_input.weekday())
+        week_end = week_start + timedelta(days=6)
+        existing = query("SELECT id,status FROM weekly_reports WHERE rep_id=? AND week_start=? AND week_end=?", (rep_id, week_start.isoformat(), week_end.isoformat()))
+        title = st.text_input("عنوان التقرير", value=f"تقرير الأسبوع {week_start.isoformat()} إلى {week_end.isoformat()}")
+        summary = st.text_area("ملخص ما أنجزته خلال الأسبوع")
+        file_upload = st.file_uploader("📎 إرفاق التقرير — Word (DOCX) فقط", type=["docx"], key="weekly_word_file")
+        if len(existing):
+            st.info(f"تم رفع تقرير هذا الأسبوع مسبقاً. الحالة: {existing.iloc[0]['status']}")
+        submit = st.button("📤 إرسال التقرير الأسبوعي", type="primary", use_container_width=True, disabled=len(existing)>0)
+        if submit:
+            if file_upload is None:
+                st.error("يجب إرفاق ملف Word بصيغة DOCX.")
+            elif not summary.strip():
+                st.error("اكتب ملخص التقرير أولاً.")
+            else:
+                path = save_upload(file_upload, "weekly_report")
+                execute("INSERT INTO weekly_reports(rep_id,week_start,week_end,title,summary,file_path) VALUES (?,?,?,?,?,?)", (rep_id, week_start.isoformat(), week_end.isoformat(), title.strip(), summary.strip(), path))
+                log_activity("إرسال تقرير أسبوعي", f"الأسبوع {week_start.isoformat()} إلى {week_end.isoformat()}")
+                st.success("تم إرسال التقرير الأسبوعي للإدارة.")
+                st.rerun()
+
+    history = query("SELECT week_start AS بداية_الأسبوع, week_end AS نهاية_الأسبوع, title AS التقرير, status AS الحالة, manager_note AS ملاحظة_الإدارة, created_at AS تاريخ_الإرسال FROM weekly_reports WHERE rep_id=? ORDER BY week_start DESC", (rep_id,))
+    st.dataframe(history, use_container_width=True, hide_index=True)
+
+    st.markdown("### 💰 ملخص مبيعاتي")
+    my_sales = query("SELECT COUNT(*) AS عدد_الفواتير, COALESCE(SUM(total_amount),0) AS قيمة_المبيعات, COALESCE(SUM((SELECT SUM(qty) FROM order_items oi WHERE oi.order_id=o.id)),0) AS عدد_الصناديق FROM orders o WHERE o.rep_id=?", (rep_id,))
+    st.dataframe(my_sales, use_container_width=True, hide_index=True)
+
+    st.markdown("### 📅 تقرير اليوم")
     selected_date = st.date_input(
         "التاريخ",
         date.today(),
@@ -1851,6 +2019,8 @@ elif page == "🏢 لوحة الإدارة":
         use_container_width=True,
         hide_index=True,
     )
+    pending_weekly = query("SELECT COUNT(*) AS count FROM weekly_reports WHERE status='pending'")
+    st.metric("📝 تقارير أسبوعية بانتظار المراجعة", int(pending_weekly.iloc[0]["count"]))
 
 
 # =========================================================
@@ -1881,7 +2051,6 @@ elif page == "👥 العملاء والمندوبون":
             SELECT
                 id,
                 name,
-                phone,
                 active
 
             FROM reps
@@ -1902,10 +2071,6 @@ elif page == "👥 العملاء والمندوبون":
                 "اسم المندوب"
             )
 
-            phone = st.text_input(
-                "رقم الجوال"
-            )
-
             submitted = st.form_submit_button(
                 "إضافة مندوب"
             )
@@ -1916,18 +2081,10 @@ elif page == "👥 العملاء والمندوبون":
 
                     execute(
                         """
-                        INSERT INTO reps
-                        (
-                            name,
-                            phone
-                        )
-
-                        VALUES (?, ?)
+                        INSERT INTO reps(name)
+                        VALUES (?)
                         """,
-                        (
-                            name,
-                            phone,
-                        ),
+                        (name,),
                     )
 
                     st.success(
@@ -1947,6 +2104,8 @@ elif page == "👥 العملاء والمندوبون":
                 c.id,
 
                 c.name AS العميل,
+
+                c.phone AS الجوال,
 
                 c.area AS المنطقة,
 
@@ -1971,10 +2130,8 @@ elif page == "👥 العملاء والمندوبون":
             "add_customer"
         ):
 
-            name = st.text_input(
-                "اسم العميل"
-            )
-
+            name = st.text_input("اسم العميل")
+            customer_phone = st.text_input("رقم جوال العميل")
             area = st.text_input(
                 "المنطقة"
             )
@@ -2014,19 +2171,14 @@ elif page == "👥 العملاء والمندوبون":
 
                     execute(
                         """
-                        INSERT INTO customers
-                        (
-                            name,
-                            area,
-                            rep_id
-                        )
-
-                        VALUES (?, ?, ?)
+                        INSERT INTO customers(name,area,rep_id,phone)
+                        VALUES (?, ?, ?, ?)
                         """,
                         (
                             name,
                             area,
                             rep_id_new,
+                            customer_phone.strip(),
                         ),
                     )
 
@@ -2079,9 +2231,9 @@ elif page == "📦 الأصناف والمخزون":
             "اسم الصنف"
         )
 
-        category = st.text_input(
-            "التصنيف"
-        )
+        category = st.text_input("التصنيف", value="ورق")
+        unit_price = st.number_input("سعر بيع الكرتون / الوحدة", min_value=0.0, step=1.0)
+        barcode = st.text_input("باركود الصنف")
 
         min_stock = st.number_input(
             "الحد الأدنى للمخزون",
@@ -2112,10 +2264,12 @@ elif page == "📦 الأصناف والمخزون":
                         name,
                         category,
                         min_stock,
-                        dormant_days
+                        dormant_days,
+                        unit_price,
+                        barcode
                     )
 
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sku,
@@ -2123,6 +2277,8 @@ elif page == "📦 الأصناف والمخزون":
                         category,
                         min_stock,
                         dormant_days,
+                        unit_price,
+                        barcode.strip(),
                     ),
                 )
 
@@ -2566,6 +2722,14 @@ elif page == "📥 التقارير والتصدير":
     # Downloads
     # -----------------------------------------------------
 
+    st.markdown("### 📝 التقارير الأسبوعية للموظفين")
+    weekly_admin = query("""
+        SELECT wr.id, r.name AS الموظف, wr.week_start AS بداية_الأسبوع, wr.week_end AS نهاية_الأسبوع, wr.title AS التقرير, wr.status AS الحالة, wr.created_at AS الإرسال, wr.manager_note AS ملاحظة_الإدارة, wr.file_path
+        FROM weekly_reports wr JOIN reps r ON r.id=wr.rep_id ORDER BY wr.id DESC
+    """)
+    if len(weekly_admin):
+        st.dataframe(weekly_admin.drop(columns=["file_path"]), use_container_width=True, hide_index=True)
+
     st.markdown(
         "### ⬇️ تحميل التقارير"
     )
@@ -2623,6 +2787,77 @@ elif page == "👁️ سجل نشاط الموظفين":
     sql += " ORDER BY id DESC LIMIT 500"
     activity = query(sql, tuple(params))
     st.dataframe(activity, use_container_width=True, hide_index=True)
+
+
+# =========================================================
+# ADMIN EMPLOYEE FULL PROFILE
+# =========================================================
+
+elif page == "👤 ملف الموظف الكامل":
+    st.markdown("## 👤 ملف الموظف الكامل")
+    st.caption("هنا ترى الإدارة كل ما فعله الموظف: العملاء، الفواتير، المبيعات، الزيارات، المخزون، التقارير وسجل النشاط.")
+    employees = query("SELECT id,name,rep_id FROM users WHERE role='employee' AND active=1 ORDER BY name")
+    if not len(employees):
+        st.info("لا يوجد موظفون فعالون.")
+    else:
+        employee_name = st.selectbox("اختر الموظف", employees["name"].tolist())
+        emp = employees[employees["name"]==employee_name].iloc[0]
+        emp_rep_id = int(emp["rep_id"])
+        stats = query("""
+            SELECT
+                (SELECT COUNT(*) FROM customers WHERE rep_id=? AND active=1) AS العملاء,
+                (SELECT COUNT(*) FROM visits WHERE rep_id=?) AS الزيارات,
+                (SELECT COUNT(*) FROM orders WHERE rep_id=?) AS الفواتير,
+                (SELECT COALESCE(SUM(total_amount),0) FROM orders WHERE rep_id=?) AS المبيعات,
+                (SELECT COUNT(*) FROM weekly_reports WHERE rep_id=?) AS التقارير
+        """, (emp_rep_id,emp_rep_id,emp_rep_id,emp_rep_id,emp_rep_id))
+        cols=st.columns(5)
+        for col,label in zip(cols,["العملاء","الزيارات","الفواتير","المبيعات","التقارير"]):
+            value=stats.iloc[0][label]
+            col.metric(label, f"{float(value):,.0f}" if label=="المبيعات" else int(value))
+
+        tabs=st.tabs(["🧾 الفواتير والمبيعات","👥 العملاء","📝 التقارير الأسبوعية","📦 المخزون والحركة","👁️ سجل النشاط"])
+        with tabs[0]:
+            orders=query("""
+                SELECT o.id AS رقم, o.order_date AS التاريخ, c.name AS العميل, o.invoice_no AS الفاتورة, o.invoice_barcode AS الباركود, o.total_amount AS قيمة_المبيعات, o.image_path AS صورة_الفاتورة, o.barcode_image_path AS صورة_الباركود
+                FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.rep_id=? ORDER BY o.id DESC
+            """, (emp_rep_id,))
+            if len(orders):
+                st.dataframe(orders.drop(columns=["صورة_الفاتورة","صورة_الباركود"]),use_container_width=True,hide_index=True)
+                selected_order=int(st.selectbox("عرض صورة فاتورة",orders["رقم"].tolist()))
+                row=orders[orders["رقم"]==selected_order].iloc[0]
+                if row["صورة_الفاتورة"] and Path(str(row["صورة_الفاتورة"])).exists():
+                    st.image(str(row["صورة_الفاتورة"]),caption=f"فاتورة {row['الفاتورة'] or selected_order}")
+        with tabs[1]:
+            cust=query("SELECT name AS العميل, phone AS الجوال, area AS المنطقة, notes AS ملاحظات FROM customers WHERE rep_id=? ORDER BY id DESC",(emp_rep_id,))
+            st.dataframe(cust,use_container_width=True,hide_index=True)
+        with tabs[2]:
+            reports=query("SELECT id,week_start AS بداية_الأسبوع,week_end AS نهاية_الأسبوع,title AS التقرير,summary AS الملخص,status AS الحالة,manager_note AS ملاحظة_الإدارة,file_path FROM weekly_reports WHERE rep_id=? ORDER BY week_start DESC",(emp_rep_id,))
+            if len(reports):
+                st.dataframe(reports.drop(columns=["file_path"]),use_container_width=True,hide_index=True)
+                selected_report=int(st.selectbox("اختيار التقرير",reports["id"].tolist()))
+                r=reports[reports["id"]==selected_report].iloc[0]
+                data=file_bytes(r["file_path"])
+                if data:
+                    st.download_button("📄 تحميل تقرير Word",data=data,file_name=Path(str(r["file_path"])).name,mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                with st.form(f"review_report_{selected_report}"):
+                    status_options=["pending","approved","rejected"]
+                    current_status=str(r["الحالة"])
+                    new_status=st.selectbox("حالة التقرير",status_options,index=status_options.index(current_status) if current_status in status_options else 0)
+                    note=st.text_area("ملاحظة الإدارة",value="" if pd.isna(r["ملاحظة_الإدارة"]) else str(r["ملاحظة_الإدارة"]))
+                    if st.form_submit_button("💾 حفظ المراجعة"):
+                        execute("UPDATE weekly_reports SET status=?,manager_note=?,reviewed_by=?,reviewed_at=? WHERE id=?",(new_status,note,current_user["id"],datetime.now().isoformat(timespec="seconds"),selected_report))
+                        log_activity("مراجعة تقرير أسبوعي",f"الموظف: {employee_name} - الحالة: {new_status}")
+                        st.success("تم حفظ المراجعة.")
+                        st.rerun()
+        with tabs[3]:
+            stock=query("SELECT p.name AS الصنف,p.sku AS SKU,COALESCE(rs.qty,0) AS الرصيد FROM products p LEFT JOIN rep_stock rs ON rs.product_id=p.id AND rs.rep_id=? WHERE p.active=1 ORDER BY p.name",(emp_rep_id,))
+            st.dataframe(stock,use_container_width=True,hide_index=True)
+            movements=query("SELECT sm.created_at AS الوقت,p.name AS الصنف,sm.movement_type AS الحركة,sm.qty AS الكمية,sm.reference AS المرجع FROM stock_movements sm JOIN products p ON p.id=sm.product_id WHERE sm.rep_id=? ORDER BY sm.id DESC LIMIT 500",(emp_rep_id,))
+            st.dataframe(movements,use_container_width=True,hide_index=True)
+        with tabs[4]:
+            activity=query("SELECT created_at AS الوقت,action AS العملية,details AS التفاصيل FROM activity_log WHERE user_name=? ORDER BY id DESC LIMIT 1000",(employee_name,))
+            st.dataframe(activity,use_container_width=True,hide_index=True)
 
 
 # =========================================================
@@ -2684,7 +2919,6 @@ elif page == "🔐 إدارة الحسابات والصلاحيات":
                 edit_active = st.checkbox("الحساب فعال", value=bool(u["active"]))
                 save = st.form_submit_button("💾 حفظ التعديلات", use_container_width=True)
                 if save:
-                    # Only manager/deputy can manage accounts; employees never reach this page.
                     if not edit_name.strip():
                         st.error("الاسم لا يمكن أن يكون فارغًا.")
                     elif edit_name.strip() != u["name"] and len(query("SELECT id FROM users WHERE name = ?", (edit_name.strip(),))):
