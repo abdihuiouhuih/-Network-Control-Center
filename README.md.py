@@ -1922,195 +1922,61 @@ elif page == "📊 تقارير المندوب":
 
 elif page == "🏢 لوحة الإدارة":
 
+    st.markdown("## 🏢 لوحة الإدارة")
     st.markdown(
-        "## 🏢 لوحة الإدارة"
-    )
-
-    st.markdown(
-        '<div class="app-subtitle">'
-        "رؤية موحدة للمبيعات والمخزون والزيارات والتحصيل"
-        "</div>",
+        '<div class="app-subtitle">رؤية محدودة للمبيعات والمخزون والزيارات والتحصيل</div>',
         unsafe_allow_html=True,
     )
 
     today = date.today().isoformat()
+    month = date.today().strftime("%Y-%m")
 
-    month = date.today().strftime(
-        "%Y-%m"
-    )
-
-    reps_count = query(
-        """
-        SELECT COUNT(*) AS count
-
-        FROM reps
-
-        WHERE active = 1
-        """
-    )
-
-    customers_count = query(
-        """
-        SELECT COUNT(*) AS count
-
-        FROM customers
-
-        WHERE active = 1
-        """
-    )
-
-    visits_count = query(
-        """
-        SELECT COUNT(*) AS count
-
-        FROM visits
-
-        WHERE visit_date = ?
-        """,
-        (today,),
-    )
-
-    sales_count = query(
-        """
-        SELECT
-            COALESCE(SUM(oi.qty), 0) AS qty
-
+    # مبيعات الشهر — قيمة فعلية للفواتير
+    sales = query("""
+        SELECT COALESCE(SUM(oi.qty * COALESCE(oi.unit_price, p.unit_price, 0)), 0) AS amount
         FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p ON p.id = oi.product_id
+        WHERE substr(o.order_date, 1, 7) = ?
+    """, (month,))
+    sales_amount = float(sales.iloc[0]["amount"]) if len(sales) else 0.0
 
-        JOIN order_items oi
-            ON oi.order_id = o.id
-
-        WHERE substr(
-            o.order_date,
-            1,
-            7
-        ) = ?
-        """,
-        (month,),
-    )
-
-    cols = st.columns(4)
-
-    with cols[0]:
-
-        kpi(
-            "المندوبون النشطون",
-            format_number(
-                reps_count.iloc[0]["count"]
-            ),
-        )
-
-    with cols[1]:
-
-        kpi(
-            "العملاء",
-            format_number(
-                customers_count.iloc[0]["count"]
-            ),
-        )
-
-    with cols[2]:
-
-        kpi(
-            "زيارات اليوم",
-            format_number(
-                visits_count.iloc[0]["count"]
-            ),
-        )
-
-    with cols[3]:
-
-        kpi(
-            "Sell-in الشهري",
-            format_number(
-                sales_count.iloc[0]["qty"]
-            ),
-        )
-
-    st.markdown(
-        "### 📊 أداء المندوبين"
-    )
-
-    performance = query(
-        """
-        SELECT
-
-            r.name AS المندوب,
-
-            COALESCE(
-                SUM(oi.qty),
-                0
-            ) AS sell_in,
-
-            COALESCE(
-
-                (
-                    SELECT SUM(amount)
-
-                    FROM collections cc
-
-                    WHERE cc.rep_id = r.id
-
-                    AND substr(
-                        cc.collection_date,
-                        1,
-                        7
-                    ) = ?
-
-                ),
-
-                0
-
-            ) AS التحصيل
-
-        FROM reps r
-
-        LEFT JOIN orders o
-            ON o.rep_id = r.id
-
-            AND substr(
-                o.order_date,
-                1,
-                7
-            ) = ?
-
-        LEFT JOIN order_items oi
-            ON oi.order_id = o.id
-
-        WHERE r.active = 1
-
-        GROUP BY r.id
-
-        ORDER BY sell_in DESC
-        """,
-        (
-            month,
-            month,
-        ),
-    )
-
-    show_table(
-        performance,
-        use_container_width=True,
-        hide_index=True,
-    )
-    pending_weekly = query("SELECT COUNT(*) AS count FROM weekly_reports WHERE status='pending'")
-    pending_count = int(pending_weekly.iloc[0]["count"])
-    st.metric("📝 تقارير أسبوعية بانتظار المراجعة", pending_count)
-
-    st.markdown("### 🕵️ آخر ما فعله الموظفون")
-    recent_activity = query("""
-        SELECT
-            created_at AS الوقت,
-            user_name AS الموظف,
-            action AS العملية,
-            details AS التفاصيل
-        FROM activity_log
-        WHERE role='employee'
-        ORDER BY id DESC
-        LIMIT 15
+    # المخزون الحالي — مجموع الكميات الموجودة عند جميع المندوبين
+    stock = query("""
+        SELECT COALESCE(SUM(qty), 0) AS qty
+        FROM rep_stock
     """)
-    show_table(recent_activity)
+    stock_qty = float(stock.iloc[0]["qty"]) if len(stock) else 0.0
+
+    # زيارات اليوم
+    visits = query("""
+        SELECT COUNT(*) AS count
+        FROM visits
+        WHERE visit_date = ?
+    """, (today,))
+    visits_count = int(visits.iloc[0]["count"]) if len(visits) else 0
+
+    # التحصيل خلال الشهر
+    collections = query("""
+        SELECT COALESCE(SUM(amount), 0) AS amount
+        FROM collections
+        WHERE substr(collection_date, 1, 7) = ?
+    """, (month,))
+    collection_amount = float(collections.iloc[0]["amount"]) if len(collections) else 0.0
+
+    # لوحة بسيطة بدون بطاقات HTML أو عرض كود
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("💰 المبيعات", f"{sales_amount:,.0f} ر.س")
+    with c2:
+        st.metric("📦 المخزون", f"{stock_qty:,.0f} صندوق")
+    with c3:
+        st.metric("👥 الزيارات", f"{visits_count:,} زيارة")
+    with c4:
+        st.metric("💵 التحصيل", f"{collection_amount:,.0f} ر.س")
+
+    st.divider()
+    st.caption(f"ملخص الإدارة — الشهر الحالي: {month} | زيارات اليوم: {today}")
 
 
 # =========================================================
