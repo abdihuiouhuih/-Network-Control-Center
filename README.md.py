@@ -111,6 +111,56 @@ st.markdown(
         margin-bottom: 18px;
     }
 
+    .sf-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        background: white;
+        margin: 10px 0 18px 0;
+    }
+
+    .sf-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.92rem;
+        direction: rtl;
+    }
+
+    .sf-table th {
+        background: #f1f5f9;
+        color: #0f172a;
+        font-weight: 800;
+        padding: 12px 14px;
+        border-bottom: 1px solid #e2e8f0;
+        white-space: nowrap;
+        text-align: right;
+    }
+
+    .sf-table td {
+        padding: 11px 14px;
+        border-bottom: 1px solid #eef2f7;
+        color: #334155;
+        text-align: right;
+        vertical-align: middle;
+    }
+
+    .sf-table tr:last-child td {
+        border-bottom: 0;
+    }
+
+    .sf-table tr:hover td {
+        background: #f8fafc;
+    }
+
+    .action-card {
+        background: linear-gradient(135deg, #0f172a, #1e293b);
+        color: white;
+        border-radius: 18px;
+        padding: 20px;
+        margin: 12px 0;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -658,6 +708,25 @@ def kpi(label, value, note=""):
     )
 
 
+def show_table(df, **kwargs):
+    """Render a static HTML table instead of Streamlit's DataFrame widget.
+    This avoids browser-side DataFrame/Arrow dynamic-module failures while
+    keeping tables readable and responsive.
+    """
+    if df is None:
+        st.info("لا توجد بيانات.")
+        return
+    try:
+        table_df = df.copy()
+    except Exception:
+        table_df = pd.DataFrame(df)
+    if table_df.empty:
+        st.info("لا توجد بيانات لعرضها.")
+        return
+    html = table_df.to_html(index=False, escape=True, classes="sf-table")
+    st.markdown(f'<div class="sf-table-wrap">{html}</div>', unsafe_allow_html=True)
+
+
 # =========================================================
 # SIDEBAR
 # =========================================================
@@ -716,7 +785,7 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 
 st.sidebar.caption(
-    "SalesFlow v2.0 • شركة أوراق"
+    "SalesFlow v3.1 • شركة أوراق"
 )
 
 # =========================================================
@@ -922,7 +991,7 @@ if page == "🏠 لوحة المندوب":
             axis=1,
         )
 
-        st.dataframe(
+        show_table(
             inventory[
                 [
                     "sku",
@@ -931,10 +1000,18 @@ if page == "🏠 لوحة المندوب":
                     "min_stock",
                     "الحالة",
                 ]
-            ],
-            use_container_width=True,
-            hide_index=True,
+            ]
         )
+
+    st.markdown("### 🕘 آخر عملياتي")
+    my_activity = query("""
+        SELECT created_at AS الوقت, action AS العملية, details AS التفاصيل
+        FROM activity_log
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 8
+    """, (current_user["id"],))
+    show_table(my_activity)
 
 
 # =========================================================
@@ -1018,19 +1095,16 @@ elif page == "👥 العملاء والزيارات":
             "ملاحظات الزيارة"
         )
 
+        st.markdown("### 📸 مرفق الزيارة")
+        visit_camera = st.camera_input("📷 تصوير المستند/المخزون بالكاميرا")
         image = st.file_uploader(
-            "📷 صورة المخزون أو الفاتورة",
-            type=[
-                "jpg",
-                "jpeg",
-                "png",
-                "webp",
-            ],
+            "أو ارفع صورة المخزون أو الفاتورة",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="visit_image_upload",
         )
 
-        st.markdown(
-            "### 📦 حصر رصيد الأصناف لدى العميل"
-        )
+        st.markdown("### 📦 حصر رصيد الأصناف لدى العميل")
+
 
         stock_input = {}
 
@@ -1053,7 +1127,7 @@ elif page == "👥 العملاء والزيارات":
         ):
 
             image_path = save_upload(
-                image,
+                visit_camera or image,
                 "visit",
             )
 
@@ -1194,7 +1268,7 @@ elif page == "👥 العملاء والزيارات":
             (rep_id,),
         )
 
-        st.dataframe(
+        show_table(
             sell_out,
             use_container_width=True,
             hide_index=True,
@@ -1264,19 +1338,17 @@ elif page == "🧾 تسجيل أوردر":
             else:
                 st.warning("لم تتم قراءة الباركود من الصورة. اكتب الرقم يدوياً إذا لزم.")
 
+        st.markdown("### 📸 صورة الفاتورة")
+        invoice_camera = st.camera_input("📷 صوّر الفاتورة مباشرة بالكاميرا")
         invoice_image = st.file_uploader(
-            "📷 صورة الفاتورة",
-            type=[
-                "jpg",
-                "jpeg",
-                "png",
-                "webp",
-            ],
+            "أو ارفع صورة الفاتورة من الجهاز",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="invoice_file_upload",
         )
 
-        st.markdown(
-            "### 🛒 أصناف الأوردر"
-        )
+        st.markdown("### 🛒 أصناف الأوردر")
+        st.caption("يمكنك تصوير الفاتورة بالكاميرا أو رفع صورتها، ثم تسجيل الأصناف والكمية.")
+
 
         order_items = {}
 
@@ -1318,10 +1390,13 @@ elif page == "🧾 تسجيل أوردر":
                 key=f"order_{product.id}",
             )
 
+        st.markdown("### 🚀 اعتماد الأوردر")
+        st.caption("بعد الضغط على الزر يتم حفظ الفاتورة، تسجيل البيع، وتحديث مخزون الموظف مباشرة.")
         if st.button(
-            "✅ اعتماد الأوردر",
+            "🧾 تسجيل الأوردر واعتماده",
             type="primary",
             use_container_width=True,
+            key="submit_order",
         ):
 
             selected_items = {
@@ -1395,7 +1470,7 @@ elif page == "🧾 تسجيل أوردر":
 
                 else:
 
-                    image_path = save_upload(invoice_image, "invoice")
+                    image_path = save_upload(invoice_camera or invoice_image, "invoice")
                     barcode_image_path = save_upload(barcode_camera, "invoice_barcode")
 
                     total_amount = 0.0
@@ -1552,19 +1627,19 @@ elif page == "📦 مخزون المندوب":
         axis=1,
     )
 
-    st.dataframe(
+    show_table(
         inventory,
         use_container_width=True,
         hide_index=True,
     )
 
-    st.markdown(
-        "### 🔄 إضافة مخزون"
-    )
+    st.markdown("### 🔄 إضافة مخزون")
+    st.caption("أي إضافة أو تعديل على مخزونك تُسجل باسمك وتظهر مباشرة في سجل الإدارة.")
 
     product_name = st.selectbox(
         "الصنف",
         products["name"].tolist(),
+        key="rep_stock_product",
     )
 
     product_id = int(
@@ -1730,7 +1805,7 @@ elif page == "💰 التحصيل":
         (rep_id,),
     )
 
-    st.dataframe(
+    show_table(
         collection_data,
         use_container_width=True,
         hide_index=True,
@@ -1773,11 +1848,11 @@ elif page == "📊 تقارير المندوب":
                 st.rerun()
 
     history = query("SELECT week_start AS بداية_الأسبوع, week_end AS نهاية_الأسبوع, title AS التقرير, status AS الحالة, manager_note AS ملاحظة_الإدارة, created_at AS تاريخ_الإرسال FROM weekly_reports WHERE rep_id=? ORDER BY week_start DESC", (rep_id,))
-    st.dataframe(history, use_container_width=True, hide_index=True)
+    show_table(history, use_container_width=True, hide_index=True)
 
     st.markdown("### 💰 ملخص مبيعاتي")
     my_sales = query("SELECT COUNT(*) AS عدد_الفواتير, COALESCE(SUM(total_amount),0) AS قيمة_المبيعات, COALESCE(SUM((SELECT SUM(qty) FROM order_items oi WHERE oi.order_id=o.id)),0) AS عدد_الصناديق FROM orders o WHERE o.rep_id=?", (rep_id,))
-    st.dataframe(my_sales, use_container_width=True, hide_index=True)
+    show_table(my_sales, use_container_width=True, hide_index=True)
 
     st.markdown("### 📅 تقرير اليوم")
     selected_date = st.date_input(
@@ -1821,7 +1896,7 @@ elif page == "📊 تقارير المندوب":
         ),
     )
 
-    st.dataframe(
+    show_table(
         report,
         use_container_width=True,
         hide_index=True,
@@ -2014,13 +2089,28 @@ elif page == "🏢 لوحة الإدارة":
         ),
     )
 
-    st.dataframe(
+    show_table(
         performance,
         use_container_width=True,
         hide_index=True,
     )
     pending_weekly = query("SELECT COUNT(*) AS count FROM weekly_reports WHERE status='pending'")
-    st.metric("📝 تقارير أسبوعية بانتظار المراجعة", int(pending_weekly.iloc[0]["count"]))
+    pending_count = int(pending_weekly.iloc[0]["count"])
+    st.metric("📝 تقارير أسبوعية بانتظار المراجعة", pending_count)
+
+    st.markdown("### 🕵️ آخر ما فعله الموظفون")
+    recent_activity = query("""
+        SELECT
+            created_at AS الوقت,
+            user_name AS الموظف,
+            action AS العملية,
+            details AS التفاصيل
+        FROM activity_log
+        WHERE role='employee'
+        ORDER BY id DESC
+        LIMIT 15
+    """)
+    show_table(recent_activity)
 
 
 # =========================================================
@@ -2059,7 +2149,7 @@ elif page == "👥 العملاء والمندوبون":
             """
         )
 
-        st.dataframe(
+        show_table(
             reps_data,
             use_container_width=True,
             hide_index=True,
@@ -2120,7 +2210,7 @@ elif page == "👥 العملاء والمندوبون":
             """
         )
 
-        st.dataframe(
+        show_table(
             customers_data,
             use_container_width=True,
             hide_index=True,
@@ -2209,7 +2299,7 @@ elif page == "📦 الأصناف والمخزون":
         """
     )
 
-    st.dataframe(
+    show_table(
         products,
         use_container_width=True,
         hide_index=True,
@@ -2332,7 +2422,7 @@ elif page == "📦 الأصناف والمخزون":
         """
     )
 
-    st.dataframe(
+    show_table(
         all_stock,
         use_container_width=True,
         hide_index=True,
@@ -2452,7 +2542,7 @@ elif page == "🎯 التارجت والتحصيل":
         """
     )
 
-    st.dataframe(
+    show_table(
         targets,
         use_container_width=True,
         hide_index=True,
@@ -2562,7 +2652,7 @@ elif page == "⚠️ الأصناف الراكدة":
             "لا توجد أصناف راكدة حسب المدة المحددة."
         )
 
-    st.dataframe(
+    show_table(
         dormant,
         use_container_width=True,
         hide_index=True,
@@ -2692,7 +2782,7 @@ elif page == "📥 التقارير والتصدير":
         "### 👥 الزيارات"
     )
 
-    st.dataframe(
+    show_table(
         visits_report,
         use_container_width=True,
         hide_index=True,
@@ -2702,7 +2792,7 @@ elif page == "📥 التقارير والتصدير":
         "### 🧾 الأوردرات"
     )
 
-    st.dataframe(
+    show_table(
         orders_report,
         use_container_width=True,
         hide_index=True,
@@ -2712,7 +2802,7 @@ elif page == "📥 التقارير والتصدير":
         "### 💰 التحصيل"
     )
 
-    st.dataframe(
+    show_table(
         collections_report,
         use_container_width=True,
         hide_index=True,
@@ -2728,7 +2818,7 @@ elif page == "📥 التقارير والتصدير":
         FROM weekly_reports wr JOIN reps r ON r.id=wr.rep_id ORDER BY wr.id DESC
     """)
     if len(weekly_admin):
-        st.dataframe(weekly_admin.drop(columns=["file_path"]), use_container_width=True, hide_index=True)
+        show_table(weekly_admin.drop(columns=["file_path"]), use_container_width=True, hide_index=True)
 
     st.markdown(
         "### ⬇️ تحميل التقارير"
@@ -2786,7 +2876,7 @@ elif page == "👁️ سجل نشاط الموظفين":
         params.append(filter_name)
     sql += " ORDER BY id DESC LIMIT 500"
     activity = query(sql, tuple(params))
-    st.dataframe(activity, use_container_width=True, hide_index=True)
+    show_table(activity, use_container_width=True, hide_index=True)
 
 
 # =========================================================
@@ -2823,18 +2913,18 @@ elif page == "👤 ملف الموظف الكامل":
                 FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.rep_id=? ORDER BY o.id DESC
             """, (emp_rep_id,))
             if len(orders):
-                st.dataframe(orders.drop(columns=["صورة_الفاتورة","صورة_الباركود"]),use_container_width=True,hide_index=True)
+                show_table(orders.drop(columns=["صورة_الفاتورة","صورة_الباركود"]),use_container_width=True,hide_index=True)
                 selected_order=int(st.selectbox("عرض صورة فاتورة",orders["رقم"].tolist()))
                 row=orders[orders["رقم"]==selected_order].iloc[0]
                 if row["صورة_الفاتورة"] and Path(str(row["صورة_الفاتورة"])).exists():
                     st.image(str(row["صورة_الفاتورة"]),caption=f"فاتورة {row['الفاتورة'] or selected_order}")
         with tabs[1]:
             cust=query("SELECT name AS العميل, phone AS الجوال, area AS المنطقة, notes AS ملاحظات FROM customers WHERE rep_id=? ORDER BY id DESC",(emp_rep_id,))
-            st.dataframe(cust,use_container_width=True,hide_index=True)
+            show_table(cust,use_container_width=True,hide_index=True)
         with tabs[2]:
             reports=query("SELECT id,week_start AS بداية_الأسبوع,week_end AS نهاية_الأسبوع,title AS التقرير,summary AS الملخص,status AS الحالة,manager_note AS ملاحظة_الإدارة,file_path FROM weekly_reports WHERE rep_id=? ORDER BY week_start DESC",(emp_rep_id,))
             if len(reports):
-                st.dataframe(reports.drop(columns=["file_path"]),use_container_width=True,hide_index=True)
+                show_table(reports.drop(columns=["file_path"]),use_container_width=True,hide_index=True)
                 selected_report=int(st.selectbox("اختيار التقرير",reports["id"].tolist()))
                 r=reports[reports["id"]==selected_report].iloc[0]
                 data=file_bytes(r["file_path"])
@@ -2852,12 +2942,12 @@ elif page == "👤 ملف الموظف الكامل":
                         st.rerun()
         with tabs[3]:
             stock=query("SELECT p.name AS الصنف,p.sku AS SKU,COALESCE(rs.qty,0) AS الرصيد FROM products p LEFT JOIN rep_stock rs ON rs.product_id=p.id AND rs.rep_id=? WHERE p.active=1 ORDER BY p.name",(emp_rep_id,))
-            st.dataframe(stock,use_container_width=True,hide_index=True)
+            show_table(stock,use_container_width=True,hide_index=True)
             movements=query("SELECT sm.created_at AS الوقت,p.name AS الصنف,sm.movement_type AS الحركة,sm.qty AS الكمية,sm.reference AS المرجع FROM stock_movements sm JOIN products p ON p.id=sm.product_id WHERE sm.rep_id=? ORDER BY sm.id DESC LIMIT 500",(emp_rep_id,))
-            st.dataframe(movements,use_container_width=True,hide_index=True)
+            show_table(movements,use_container_width=True,hide_index=True)
         with tabs[4]:
             activity=query("SELECT created_at AS الوقت,action AS العملية,details AS التفاصيل FROM activity_log WHERE user_name=? ORDER BY id DESC LIMIT 1000",(employee_name,))
-            st.dataframe(activity,use_container_width=True,hide_index=True)
+            show_table(activity,use_container_width=True,hide_index=True)
 
 
 # =========================================================
@@ -2907,7 +2997,7 @@ elif page == "🔐 إدارة الحسابات والصلاحيات":
     with tab_manage:
         users = query("SELECT id,name,role,active FROM users ORDER BY CASE role WHEN 'manager' THEN 1 WHEN 'deputy' THEN 2 ELSE 3 END, name")
         if len(users):
-            st.dataframe(
+            show_table(
                 users.assign(الصلاحية=users["role"].map({"manager":"مدير","deputy":"نائب مدير","employee":"موظف"}), الحالة=users["active"].map({1:"فعال",0:"معطل"}))[['name','الصلاحية','الحالة']].rename(columns={'name':'الاسم'}),
                 use_container_width=True, hide_index=True
             )
