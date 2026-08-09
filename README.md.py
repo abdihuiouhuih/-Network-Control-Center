@@ -2861,14 +2861,16 @@ elif page == "🔐 إدارة الحسابات والصلاحيات":
                     st.rerun()
 
     with tab_manage:
-        users = query("SELECT id,name,role,active FROM users ORDER BY CASE role WHEN 'manager' THEN 1 WHEN 'deputy' THEN 2 ELSE 3 END, name")
+        users = query("SELECT id,name,role,active,rep_id FROM users ORDER BY CASE role WHEN 'manager' THEN 1 WHEN 'deputy' THEN 2 ELSE 3 END, name")
         if len(users):
             show_table(
                 users.assign(الصلاحية=users["role"].map({"manager":"مدير","deputy":"نائب مدير","employee":"موظف"}), الحالة=users["active"].map({1:"فعال",0:"معطل"}))[['name','الصلاحية','الحالة']].rename(columns={'name':'الاسم'}),
                 use_container_width=True, hide_index=True
             )
-            selected = st.selectbox("اختر حسابًا للتعديل", users["name"].tolist())
+
+            selected = st.selectbox("اختر حسابًا للتعديل أو الحذف", users["name"].tolist())
             u = users[users["name"] == selected].iloc[0]
+
             with st.form("edit_account_form"):
                 edit_name = st.text_input("الاسم", value=u["name"])
                 edit_pin = st.text_input("رمز سري جديد (اتركه فارغًا لعدم تغييره)", type="password", max_chars=20)
@@ -2889,6 +2891,56 @@ elif page == "🔐 إدارة الحسابات والصلاحيات":
                         log_activity("تعديل حساب", f"تم تعديل حساب: {u['name']}")
                         st.success("تم حفظ التعديلات.")
                         st.rerun()
+
+            # حذف الحساب نهائيًا من جدول الدخول، مع إبقاء السجلات التجارية التاريخية
+            # (الفواتير/الزيارات/التقارير) حتى لا تضيع محاسبيًا. الموظف يصبح غير نشط.
+            st.markdown("### 🗑️ حذف الحساب")
+            st.warning(
+                "حذف الحساب يمنع صاحبه من تسجيل الدخول نهائيًا. سجلات المبيعات والفواتير والزيارات والتقارير السابقة تبقى محفوظة في الشركة للتدقيق. "
+                "إذا كان الحساب لموظف، يتم تعطيل ملف المندوب المرتبط به أيضًا."
+            )
+
+            is_current = int(u["id"]) == int(current_user.get("id", -1))
+            active_manager_count = int(query("SELECT COUNT(*) AS c FROM users WHERE role='manager' AND active=1").iloc[0]["c"])
+            can_delete = True
+            if is_current:
+                can_delete = False
+                st.info("لا يمكن حذف الحساب الذي تستخدمه حاليًا. أنشئ الحساب البديل أولًا ثم احذف الحساب القديم.")
+            elif u["role"] == "manager" and current_user.get("role") != "manager":
+                can_delete = False
+                st.error("حذف حساب المدير متاح للمدير الحالي فقط.")
+            elif u["role"] == "manager" and active_manager_count <= 1:
+                can_delete = False
+                st.error("لا يمكن حذف آخر مدير نشط. أضف مديرًا بديلًا أولًا.")
+
+            confirm_delete = st.checkbox(
+                "أؤكد أنني أريد حذف هذا الحساب نهائيًا ومنع صاحبه من الدخول.",
+                disabled=not can_delete,
+                key=f"confirm_delete_{int(u['id'])}"
+            )
+            if st.button(
+                "🗑️ حذف الحساب نهائيًا",
+                type="secondary",
+                use_container_width=True,
+                disabled=(not can_delete or not confirm_delete),
+                key=f"delete_account_{int(u['id'])}"
+            ):
+                target_name = str(u["name"])
+                target_role = str(u["role"])
+                target_rep_id = u["rep_id"]
+
+                # سجل العملية قبل حذف سجل الدخول نفسه.
+                log_activity(
+                    "حذف حساب",
+                    f"تم حذف حساب {target_role}: {target_name}. تم منع الحساب من الدخول، وحُفظت السجلات التجارية التاريخية."
+                )
+
+                execute("DELETE FROM users WHERE id=?", (int(u["id"]),))
+                if target_role == "employee" and pd.notna(target_rep_id):
+                    execute("UPDATE reps SET active=0 WHERE id=?", (int(target_rep_id),))
+
+                st.success(f"تم حذف حساب {target_name} ومنعه من تسجيل الدخول.")
+                st.rerun()
 
 # =========================================================
 # FOOTER
