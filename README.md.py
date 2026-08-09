@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import os
+import hashlib
+import hmac
+import secrets
+import requests
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -12,6 +17,105 @@ APP_DIR = Path(__file__).parent
 DB_PATH = APP_DIR / "sales_app.db"
 UPLOAD_DIR = APP_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# =========================================================
+# SECURITY / OTP CONFIGURATION
+# =========================================================
+# Production values should be stored in Streamlit secrets or environment variables.
+# The manager phone is the primary identity for the management portal.
+def config_value(name, default=""):
+    try:
+        value = st.secrets.get(name, None)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+MANAGER_PHONE = str(config_value("MANAGER_PHONE", "")).strip()
+ADMIN_ALLOWED_IPS = {
+    ip.strip()
+    for ip in str(config_value("ADMIN_ALLOWED_IPS", "")).split(",")
+    if ip.strip()
+}
+DEV_OTP_MODE = str(config_value("DEV_OTP_MODE", "false")).lower() == "true"
+OTP_TTL_SECONDS = 300
+OTP_RESEND_SECONDS = 60
+
+TWILIO_ACCOUNT_SID = str(config_value("TWILIO_ACCOUNT_SID", "")).strip()
+TWILIO_AUTH_TOKEN = str(config_value("TWILIO_AUTH_TOKEN", "")).strip()
+TWILIO_FROM_NUMBER = str(config_value("TWILIO_FROM_NUMBER", "")).strip()
+
+
+def normalize_phone(phone):
+    phone = str(phone or "").strip().replace(" ", "").replace("-", "")
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    elif phone.startswith("05") and len(phone) == 10:
+        phone = "+966" + phone[1:]
+    return phone
+
+
+def get_client_ip():
+    try:
+        headers = st.context.headers
+        forwarded = headers.get("X-Forwarded-For") or headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return headers.get("X-Real-IP") or headers.get("x-real-ip") or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def admin_ip_allowed():
+    if not ADMIN_ALLOWED_IPS:
+        return True
+    return get_client_ip() in ADMIN_ALLOWED_IPS
+
+
+def hash_otp(otp):
+    return hashlib.sha256(str(otp).encode("utf-8")).hexdigest()
+
+
+def send_sms_otp(phone, otp):
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER):
+        if DEV_OTP_MODE:
+            return True, "DEV_OTP:" + otp
+        return False, "خدمة الرسائل غير مهيأة. أضف بيانات Twilio في Secrets/Environment."
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    body = {
+        "From": TWILIO_FROM_NUMBER,
+        "To": phone,
+        "Body": f"رمز التحقق الخاص بـ SalesFlow هو: {otp}. صالح لمدة 5 دقائق."
+    }
+    try:
+        response = requests.post(
+            url,
+            data=body,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            timeout=15,
+        )
+        if response.ok:
+            return True, "تم إرسال رمز التحقق."
+        return False, "تعذر إرسال الرسالة النصية. تحقق من إعدادات خدمة SMS."
+    except Exception:
+        return False, "تعذر الاتصال بخدمة الرسائل النصية."
+
+
+def log_action(action, role=None, actor_id=None, details=""):
+    try:
+        execute(
+            """
+            INSERT INTO audit_log(action, role, actor_id, details, created_at, ip_address)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (action, role, actor_id, details, datetime.now().isoformat(timespec="seconds"), get_client_ip()),
+        )
+    except Exception:
+        pass
+
 
 st.set_page_config(
     page_title="SalesFlow | إدارة المبيعات والمخزون",
@@ -234,6 +338,67 @@ def init_db():
     )
 
     # -----------------------------------------------------
+    # Security / attachments / audit tables
+    # -----------------------------------------------------
+    cursor.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS otp_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            role TEXT NOT NULL,
+            code_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER DEFAULT 0,
+            used INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uploaded_by_role TEXT NOT NULL,
+            uploaded_by_id INTEGER,
+            employee_name TEXT,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            notes TEXT,
+            file_path TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            review_note TEXT,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            role TEXT,
+            actor_id INTEGER,
+            details TEXT,
+            created_at TEXT NOT NULL,
+            ip_address TEXT
+        );
+        """
+    )
+
+    # Safe migrations for databases created by SalesFlow v1.
+    customer_columns = {row[1] for row in cursor.execute("PRAGMA table_info(customers)").fetchall()}
+    if "phone" not in customer_columns:
+        cursor.execute("ALTER TABLE customers ADD COLUMN phone TEXT")
+
+    order_columns = {row[1] for row in cursor.execute("PRAGMA table_info(orders)").fetchall()}
+    if "review_status" not in order_columns:
+        cursor.execute("ALTER TABLE orders ADD COLUMN review_status TEXT DEFAULT 'pending'")
+    if "review_note" not in order_columns:
+        cursor.execute("ALTER TABLE orders ADD COLUMN review_note TEXT")
+
+    visit_columns = {row[1] for row in cursor.execute("PRAGMA table_info(visits)").fetchall()}
+    if "review_status" not in visit_columns:
+        cursor.execute("ALTER TABLE visits ADD COLUMN review_status TEXT DEFAULT 'pending'")
+    if "review_note" not in visit_columns:
+        cursor.execute("ALTER TABLE visits ADD COLUMN review_note TEXT")
+
+    # -----------------------------------------------------
     # Demo data
     # -----------------------------------------------------
 
@@ -385,6 +550,197 @@ def kpi(label, value, note=""):
 
 
 # =========================================================
+# AUTHENTICATION
+# =========================================================
+
+def find_identity(role, phone):
+    """Only المدير and موظف have accounts. Customers are data records only."""
+    phone = normalize_phone(phone)
+
+    if role == "المدير":
+        if not MANAGER_PHONE or phone != normalize_phone(MANAGER_PHONE):
+            return False, None, None
+        rows = query(
+            "SELECT id FROM reps WHERE phone=? AND active=1 ORDER BY id LIMIT 1",
+            (MANAGER_PHONE,),
+        )
+        if rows.empty:
+            return False, None, None
+        return True, int(rows.iloc[0]["id"]), None
+
+    if role == "موظف":
+        rows = query("SELECT id, phone FROM reps WHERE active=1")
+        for _, row in rows.iterrows():
+            # Never expose the manager account as an employee account.
+            if MANAGER_PHONE and normalize_phone(row["phone"]) == normalize_phone(MANAGER_PHONE):
+                continue
+            if phone == normalize_phone(row["phone"]):
+                return True, int(row["id"]), None
+        return False, None, None
+
+    return False, None, None
+
+
+def request_otp(role, phone):
+    phone = normalize_phone(phone)
+    now = datetime.now()
+    existing = query(
+        "SELECT created_at FROM otp_codes WHERE phone = ? AND role = ? ORDER BY id DESC LIMIT 1",
+        (phone, role),
+    )
+    if len(existing):
+        try:
+            last = datetime.fromisoformat(existing.iloc[0]["created_at"])
+            if (now - last).total_seconds() < OTP_RESEND_SECONDS:
+                remaining = int(OTP_RESEND_SECONDS - (now - last).total_seconds())
+                return False, f"انتظر {remaining} ثانية قبل طلب رمز جديد.", None
+        except Exception:
+            pass
+
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    execute(
+        """
+        INSERT INTO otp_codes(phone, role, code_hash, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            phone,
+            role,
+            hash_otp(otp),
+            (now + timedelta(seconds=OTP_TTL_SECONDS)).isoformat(),
+            now.isoformat(),
+        ),
+    )
+    ok, message = send_sms_otp(phone, otp)
+    if ok:
+        return True, message, otp if DEV_OTP_MODE else None
+    return False, message, None
+
+
+def verify_otp(role, phone, otp):
+    phone = normalize_phone(phone)
+    rows = query(
+        """
+        SELECT * FROM otp_codes
+        WHERE phone = ? AND role = ? AND used = 0
+        ORDER BY id DESC LIMIT 1
+        """,
+        (phone, role),
+    )
+    if not len(rows):
+        return False, "لا يوجد رمز تحقق صالح. اطلب رمزاً جديداً."
+
+    row = rows.iloc[0]
+    if datetime.now() > datetime.fromisoformat(row["expires_at"]):
+        return False, "انتهت صلاحية رمز التحقق."
+    if int(row["attempts"]) >= 5:
+        return False, "تم تجاوز عدد المحاولات. اطلب رمزاً جديداً."
+
+    execute("UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?", (int(row["id"]),))
+    if not hmac.compare_digest(str(row["code_hash"]), hash_otp(otp)):
+        return False, "رمز التحقق غير صحيح."
+
+    execute("UPDATE otp_codes SET used = 1 WHERE id = ?", (int(row["id"]),))
+    ok, rep_id, customer_id = find_identity(role, phone)
+    if not ok:
+        return False, "تعذر تحديد الحساب المرتبط بهذا الرقم."
+
+    st.session_state.authenticated = True
+    st.session_state.auth_role = role
+    st.session_state.auth_phone = phone
+    st.session_state.auth_rep_id = rep_id
+    st.session_state.auth_customer_id = customer_id
+    log_action("تسجيل دخول ناجح", role, rep_id or customer_id, "OTP")
+    return True, "تم تسجيل الدخول بنجاح."
+
+
+def logout():
+    role = st.session_state.get("auth_role")
+    actor_id = st.session_state.get("auth_rep_id") or st.session_state.get("auth_customer_id")
+    if role:
+        log_action("تسجيل خروج", role, actor_id, "")
+    for key in [
+        "authenticated", "auth_role", "auth_phone",
+        "auth_rep_id", "auth_customer_id", "otp_requested_phone",
+    ]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+def render_login():
+    st.markdown("## 🔐 تسجيل الدخول الآمن")
+    st.caption("لن يتم فتح أي لوحة قبل التحقق من رقم الجوال المرتبط بالحساب.")
+
+    role = st.radio(
+        "من أنت؟",
+        ["المدير", "موظف"],
+        horizontal=True,
+    )
+    phone = st.text_input(
+        "رقم الجوال المرتبط بالشركة",
+        placeholder="05xxxxxxxx أو +9665xxxxxxxx",
+    )
+
+    if role == "المدير" and ADMIN_ALLOWED_IPS and not admin_ip_allowed():
+        st.error("هذا الجهاز غير مصرح له بالدخول إلى لوحة الإدارة.")
+        st.stop()
+
+    identity_ok, _, _ = find_identity(role, phone) if phone else (False, None, None)
+
+    if st.button("📨 إرسال رمز التحقق", type="primary", use_container_width=True):
+        if not phone:
+            st.error("أدخل رقم الجوال أولاً.")
+        elif not identity_ok:
+            st.error("رقم الجوال غير مرتبط بحساب فعال في النظام.")
+        elif role == "المدير" and not MANAGER_PHONE:
+            st.error("لم يتم إعداد رقم جوال المدير في Secrets/Environment.")
+        else:
+            ok, message, dev_code = request_otp(role, phone)
+            if ok:
+                st.session_state.otp_requested_phone = normalize_phone(phone)
+                st.session_state.otp_requested_role = role
+                st.success(message)
+                if dev_code:
+                    st.warning(f"وضع الاختبار فقط — رمز OTP: {dev_code}")
+            else:
+                st.error(message)
+
+    requested_phone = st.session_state.get("otp_requested_phone")
+    requested_role = st.session_state.get("otp_requested_role")
+    if requested_phone and requested_role:
+        st.divider()
+        otp = st.text_input("رمز التحقق SMS", max_chars=6, type="password")
+        if st.button("✅ تحقق وادخل", use_container_width=True):
+            if normalize_phone(phone) != requested_phone or role != requested_role:
+                st.error("بيانات الدخول تغيرت. اطلب رمز تحقق جديد.")
+            else:
+                ok, message = verify_otp(role, phone, otp)
+                if ok:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+
+if not st.session_state.get("authenticated", False):
+    render_login()
+    st.stop()
+
+role = st.session_state.auth_role
+rep_id = st.session_state.get("auth_rep_id")
+customer_id = None
+
+# Enforce the management IP restriction on every authenticated request,
+# not only when the OTP is requested.
+if role == "المدير" and not admin_ip_allowed():
+    log_action("رفض دخول الإدارة بسبب IP", "المدير", rep_id, get_client_ip())
+    logout()
+
+# Make sure a manager session is really tied to the configured manager phone.
+if role == "المدير" and normalize_phone(st.session_state.get("auth_phone", "")) != normalize_phone(MANAGER_PHONE):
+    logout()
+
+# =========================================================
 # SIDEBAR
 # =========================================================
 
@@ -401,100 +757,52 @@ st.sidebar.caption(
     "نظام إدارة المبيعات والمخزون"
 )
 
-role = st.sidebar.selectbox(
-    "نوع المستخدم",
-    [
-        "مندوب مبيعات",
-        "الإدارة",
-    ],
-)
-
-reps = query(
-    """
-    SELECT *
-    FROM reps
-    WHERE active = 1
-    ORDER BY name
-    """
-)
-
-if len(reps):
-
-    selected_rep = st.sidebar.selectbox(
-        "المندوب",
-        reps["name"].tolist(),
-    )
-
-    rep_id = int(
-        reps.loc[
-            reps["name"] == selected_rep,
-            "id",
-        ].iloc[0]
-    )
-
-else:
-
-    rep_id = 1
-
-
 # =========================================================
 # NAVIGATION
 # =========================================================
 
-if role == "مندوب مبيعات":
+st.sidebar.success(f"الدور: {role}")
+st.sidebar.caption(f"الجوال: {st.session_state.get('auth_phone', '')}")
 
+if role == "موظف":
     pages = [
-
-        "🏠 لوحة المندوب",
-
+        "🏠 لوحة الموظف",
         "👥 العملاء والزيارات",
-
         "🧾 تسجيل أوردر",
-
         "📦 مخزون المندوب",
-
         "💰 التحصيل",
-
-        "📊 تقارير المندوب",
-
+        "📎 مرفقات الموظف",
+        "📊 تقارير الموظف",
     ]
-
 else:
-
     pages = [
-
         "🏢 لوحة الإدارة",
-
+        "📥 مراجعة الموظفين والمرفقات",
         "👥 العملاء والمندوبون",
-
         "📦 الأصناف والمخزون",
-
         "🎯 التارجت والتحصيل",
-
         "⚠️ الأصناف الراكدة",
-
         "📥 التقارير والتصدير",
-
+        "🕵️ سجل العمليات",
     ]
 
-
-page = st.sidebar.radio(
-    "التنقل",
-    pages,
-)
+page = st.sidebar.radio("التنقل", pages)
+if st.sidebar.button("🚪 تسجيل الخروج", use_container_width=True):
+    logout()
 
 
 st.sidebar.divider()
 
 st.sidebar.caption(
-    "SalesFlow v1.0"
+    "SalesFlow v2.1 • Employee + Admin OTP"
 )
+st.sidebar.caption("🔒 صلاحيات منفصلة + OTP + سجل عمليات")
 
 # =========================================================
 # REP DASHBOARD
 # =========================================================
 
-if page == "🏠 لوحة المندوب":
+if page == "🏠 لوحة الموظف":
 
     st.markdown(
         '<div class="app-title">مرحباً بك 👋</div>',
@@ -611,7 +919,7 @@ if page == "🏠 لوحة المندوب":
     with cols[1]:
 
         kpi(
-            "Sell-in هذا الشهر",
+            "Sell-in (كمية) هذا الشهر",
             format_number(
                 sales_value
             ),
@@ -854,6 +1162,18 @@ elif page == "👥 العملاء والزيارات":
                     image_path,
                 ),
             )
+
+            if image_path:
+                rep = query("SELECT name FROM reps WHERE id=?", (rep_id,))
+                employee_name = rep.iloc[0]["name"] if len(rep) else "موظف"
+                execute(
+                    """
+                    INSERT INTO attachments(uploaded_by_role, uploaded_by_id, employee_name, category, title, notes, file_path, status, created_at)
+                    VALUES ('موظف', ?, ?, 'صورة مخزون', ?, ?, ?, 'pending', ?)
+                    """,
+                    (rep_id, employee_name, f"زيارة عميل - {customer_name}", notes, image_path, datetime.now().isoformat(timespec="seconds")),
+                )
+                log_action("إرفاق صورة زيارة", "موظف", rep_id, f"customer={customer_id}")
 
             for product_id, qty in stock_input.items():
 
@@ -1191,6 +1511,18 @@ elif page == "🧾 تسجيل أوردر":
                         ),
                     )
 
+                    if image_path:
+                        rep = query("SELECT name FROM reps WHERE id=?", (rep_id,))
+                        employee_name = rep.iloc[0]["name"] if len(rep) else "موظف"
+                        execute(
+                            """
+                            INSERT INTO attachments(uploaded_by_role, uploaded_by_id, employee_name, category, title, notes, file_path, status, created_at)
+                            VALUES ('موظف', ?, ?, 'فاتورة', ?, ?, ?, 'pending', ?)
+                            """,
+                            (rep_id, employee_name, f"فاتورة {invoice_number or order_id}", "", image_path, datetime.now().isoformat(timespec="seconds")),
+                        )
+                        log_action("إرفاق فاتورة", "موظف", rep_id, f"order={order_id}")
+
                     for product_id, qty in selected_items.items():
 
                         execute(
@@ -1521,10 +1853,51 @@ elif page == "💰 التحصيل":
 
 
 # =========================================================
+# EMPLOYEE ATTACHMENTS
+# =========================================================
+
+elif page == "📎 مرفقات الموظف":
+    st.markdown("## 📎 مرفقات الموظف")
+    st.caption("ارفع الفواتير، صور المخزون، أو أي مستند يطلبه المدير. سيظهر تلقائياً في مركز المراجعة.")
+
+    rep = query("SELECT name FROM reps WHERE id = ?", (rep_id,))
+    employee_name = rep.iloc[0]["name"] if len(rep) else "موظف"
+    category = st.selectbox("نوع المرفق", ["فاتورة", "صورة مخزون", "مستند", "أخرى"])
+    title = st.text_input("عنوان المرفق")
+    notes = st.text_area("ملاحظات")
+    uploaded = st.file_uploader("إرفاق الملف", type=["jpg", "jpeg", "png", "webp", "pdf", "xlsx", "xls", "csv", "docx"])
+
+    if st.button("📤 رفع للمراجعة", type="primary", use_container_width=True):
+        if not title.strip() or uploaded is None:
+            st.error("أدخل عنوان المرفق واختر ملفاً.")
+        else:
+            path = save_upload(uploaded, "employee")
+            execute(
+                """
+                INSERT INTO attachments(uploaded_by_role, uploaded_by_id, employee_name, category, title, notes, file_path, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                ("موظف", rep_id, employee_name, category, title.strip(), notes, path, datetime.now().isoformat(timespec="seconds")),
+            )
+            log_action("رفع مرفق", "موظف", rep_id, f"{category}: {title}")
+            st.success("تم رفع المرفق وأصبح بانتظار مراجعة المدير.")
+
+    my_files = query(
+        """
+        SELECT id, category AS النوع, title AS العنوان, status AS الحالة, created_at AS تاريخ_الرفع, review_note AS ملاحظة_المدير
+        FROM attachments WHERE uploaded_by_role='موظف' AND uploaded_by_id=? ORDER BY id DESC
+        """,
+        (rep_id,),
+    )
+    st.markdown("### 📚 مرفقاتي السابقة")
+    st.dataframe(my_files, use_container_width=True, hide_index=True)
+
+
+# =========================================================
 # REP REPORTS
 # =========================================================
 
-elif page == "📊 تقارير المندوب":
+elif page == "📊 تقارير الموظف":
 
     st.markdown(
         "## 📊 تقارير المندوب"
@@ -1589,6 +1962,66 @@ elif page == "📊 تقارير المندوب":
             file_name=f"rep_report_{selected_date}.csv",
             mime="text/csv",
         )
+
+
+# =========================================================
+# CUSTOMER PORTAL
+# =========================================================
+
+elif page == "__CUSTOMER_DISABLED__":
+    customer = query("SELECT * FROM customers WHERE id = ?", (customer_id,))
+    if len(customer):
+        row = customer.iloc[0]
+        st.markdown("## 🏠 بوابة العميل")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("العميل", row["name"])
+        c2.metric("المنطقة", row["area"] or "-")
+        c3.metric("الجوال", row["phone"] or "-")
+        st.info("هذه البوابة تعرض بيانات هذا العميل فقط.")
+
+elif page == "📦 مخزوني":
+    stock = query(
+        """
+        SELECT p.sku AS SKU, p.name AS الصنف, p.category AS التصنيف,
+               vs.qty AS الرصيد, v.visit_date AS آخر_زيارة
+        FROM visit_stock vs
+        JOIN visits v ON v.id = vs.visit_id
+        JOIN products p ON p.id = vs.product_id
+        JOIN (SELECT customer_id, product_id, MAX(id) AS latest_id FROM visit_stock vs2 JOIN visits v2 ON v2.id=vs2.visit_id GROUP BY customer_id, product_id) latest
+          ON latest.latest_id = vs.id
+        WHERE v.customer_id = ?
+        ORDER BY p.name
+        """,
+        (customer_id,),
+    )
+    st.markdown("## 📦 مخزوني")
+    st.dataframe(stock, use_container_width=True, hide_index=True)
+
+elif page == "🧾 طلباتي":
+    orders = query(
+        """
+        SELECT o.order_date AS التاريخ, o.invoice_no AS الفاتورة,
+               SUM(oi.qty) AS الكمية, o.review_status AS حالة_المراجعة
+        FROM orders o
+        JOIN order_items oi ON oi.order_id=o.id
+        WHERE o.customer_id=?
+        GROUP BY o.id ORDER BY o.id DESC
+        """,
+        (customer_id,),
+    )
+    st.markdown("## 🧾 طلباتي")
+    st.dataframe(orders, use_container_width=True, hide_index=True)
+
+elif page == "📎 مرفقاتي":
+    files = query(
+        """
+        SELECT id, category AS النوع, title AS العنوان, status AS الحالة, created_at AS التاريخ, review_note AS ملاحظة
+        FROM attachments WHERE uploaded_by_role='عميل' AND uploaded_by_id=? ORDER BY id DESC
+        """,
+        (customer_id,),
+    )
+    st.markdown("## 📎 مرفقاتي")
+    st.dataframe(files, use_container_width=True, hide_index=True)
 
 
 # =========================================================
@@ -1696,7 +2129,7 @@ elif page == "🏢 لوحة الإدارة":
     with cols[3]:
 
         kpi(
-            "Sell-in الشهري",
+            "Sell-in (كمية) الشهري",
             format_number(
                 sales_count.iloc[0]["qty"]
             ),
@@ -1772,14 +2205,83 @@ elif page == "🏢 لوحة الإدارة":
 
 
 # =========================================================
+# MANAGEMENT REVIEW CENTER
+# =========================================================
+
+elif page == "📥 مراجعة الموظفين والمرفقات":
+    st.markdown("## 📥 مركز مراجعة أعمال الموظفين")
+    st.caption("كل فاتورة أو صورة مخزون أو مستند يرفعه الموظف يظهر هنا للمراجعة.")
+
+    tab_pending, tab_all = st.tabs(["⏳ بانتظار المراجعة", "📚 كل المرفقات"])
+
+    with tab_pending:
+        pending = query(
+            """
+            SELECT id, employee_name AS الموظف, category AS النوع, title AS العنوان,
+                   notes AS الملاحظات, created_at AS تاريخ_الرفع, status AS الحالة
+            FROM attachments
+            WHERE status = 'pending'
+            ORDER BY id DESC
+            """
+        )
+        if len(pending):
+            st.dataframe(pending, use_container_width=True, hide_index=True)
+            attachment_id = st.selectbox("اختر مرفقاً للمراجعة", pending["id"].tolist())
+            selected = pending[pending["id"] == attachment_id].iloc[0]
+            st.write(f"**{selected['الموظف']} — {selected['النوع']} — {selected['العنوان']}**")
+            attachment = query("SELECT * FROM attachments WHERE id = ?", (int(attachment_id),))
+            path = attachment.iloc[0]["file_path"]
+            if Path(path).exists():
+                suffix = Path(path).suffix.lower()
+                if suffix in [".jpg", ".jpeg", ".png", ".webp"]:
+                    st.image(path, use_container_width=True)
+                else:
+                    with open(path, "rb") as f:
+                        st.download_button("⬇️ فتح/تحميل المرفق", f, file_name=Path(path).name)
+            review_note = st.text_area("ملاحظة المدير")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✅ اعتماد", use_container_width=True):
+                    execute(
+                        "UPDATE attachments SET status='approved', review_note=?, reviewed_at=?, reviewed_by=? WHERE id=?",
+                        (review_note, datetime.now().isoformat(timespec="seconds"), MANAGER_PHONE, int(attachment_id)),
+                    )
+                    log_action("اعتماد مرفق موظف", "المدير", None, f"attachment={attachment_id}")
+                    st.success("تم اعتماد المرفق.")
+                    st.rerun()
+            with c2:
+                if st.button("❌ رفض", use_container_width=True):
+                    execute(
+                        "UPDATE attachments SET status='rejected', review_note=?, reviewed_at=?, reviewed_by=? WHERE id=?",
+                        (review_note, datetime.now().isoformat(timespec="seconds"), MANAGER_PHONE, int(attachment_id)),
+                    )
+                    log_action("رفض مرفق موظف", "المدير", None, f"attachment={attachment_id}")
+                    st.warning("تم رفض المرفق.")
+                    st.rerun()
+        else:
+            st.success("لا توجد مرفقات معلقة حالياً.")
+
+    with tab_all:
+        all_attachments = query(
+            """
+            SELECT id, employee_name AS الموظف, category AS النوع, title AS العنوان,
+                   status AS الحالة, created_at AS تاريخ_الرفع, reviewed_at AS تاريخ_المراجعة, review_note AS ملاحظة_المدير
+            FROM attachments ORDER BY id DESC LIMIT 500
+            """
+        )
+        st.dataframe(all_attachments, use_container_width=True, hide_index=True)
+
+
+# =========================================================
 # CUSTOMERS AND REPS
 # =========================================================
 
 elif page == "👥 العملاء والمندوبون":
 
     st.markdown(
-        "## 👥 العملاء والمندوبون"
+        "## 👥 العملاء والموظفون"
     )
+    st.caption("العملاء سجلات داخل النظام فقط ولا يملكون حسابات دخول. الحسابات مخصصة للمدير والموظفين.")
 
     tab_reps, tab_customers = st.tabs(
         [
@@ -1868,6 +2370,8 @@ elif page == "👥 العملاء والمندوبون":
 
                 c.area AS المنطقة,
 
+                c.phone AS الجوال,
+
                 r.name AS المندوب
 
             FROM customers c
@@ -1893,8 +2397,16 @@ elif page == "👥 العملاء والمندوبون":
                 "اسم العميل"
             )
 
+            phone = st.text_input(
+                "رقم جوال العميل"
+            )
+
             area = st.text_input(
                 "المنطقة"
+            )
+
+            phone = st.text_input(
+                "رقم جوال العميل"
             )
 
             reps_list = query(
@@ -1936,14 +2448,16 @@ elif page == "👥 العملاء والمندوبون":
                         (
                             name,
                             area,
+                            phone,
                             rep_id
                         )
 
-                        VALUES (?, ?, ?)
+                        VALUES (?, ?, ?, ?)
                         """,
                         (
                             name,
                             area,
+                            normalize_phone(phone),
                             rep_id_new,
                         ),
                     )
@@ -2522,6 +3036,22 @@ elif page == "📥 التقارير والتصدير":
             file_name=f"collections_{report_date}.csv",
             mime="text/csv",
         )
+
+
+# =========================================================
+# AUDIT LOG
+# =========================================================
+
+elif page == "🕵️ سجل العمليات":
+    st.markdown("## 🕵️ سجل العمليات")
+    st.caption("سجل تدقيق للعمليات المهمة: الدخول، رفع المرفقات، واعتماد/رفض المستندات.")
+    logs = query(
+        """
+        SELECT created_at AS الوقت, role AS الدور, action AS العملية, actor_id AS رقم_الحساب, details AS التفاصيل, ip_address AS IP
+        FROM audit_log ORDER BY id DESC LIMIT 1000
+        """
+    )
+    st.dataframe(logs, use_container_width=True, hide_index=True)
 
 
 # =========================================================
