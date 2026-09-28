@@ -6,12 +6,11 @@ import platform
 import re
 import csv
 import io
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 # ============================================================
 # NetworkScope - Local Network Discovery
-# Single-file Streamlit application
 # ============================================================
 
 st.set_page_config(
@@ -21,51 +20,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-# -----------------------------
-# CSS
-# -----------------------------
-
 st.markdown(
     """
     <style>
-        .block-container {
-            max-width: 1400px;
-            padding-top: 2rem;
-        }
-
-        .main-title {
-            font-size: 2.5rem;
-            font-weight: 800;
-            margin-bottom: 0.2rem;
-        }
-
-        .subtitle {
-            color: #777;
-            margin-bottom: 2rem;
-        }
-
+        .block-container { max-width: 1400px; padding-top: 2rem; }
+        .main-title { font-size: 2.5rem; font-weight: 800; margin-bottom: .2rem; }
+        .subtitle { color: #777; margin-bottom: 2rem; }
         div[data-testid="stMetric"] {
             border: 1px solid rgba(128,128,128,.2);
             padding: 15px;
             border-radius: 14px;
         }
-
-        .warning-box {
-            padding: 15px;
-            border-radius: 12px;
-            background: rgba(255, 193, 7, .12);
-            border: 1px solid rgba(255, 193, 7, .35);
-        }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-
-# -----------------------------
-# Session State
-# -----------------------------
 
 if "results" not in st.session_state:
     st.session_state.results = []
@@ -73,224 +42,155 @@ if "results" not in st.session_state:
 if "last_network" not in st.session_state:
     st.session_state.last_network = ""
 
-if "detected_networks" not in st.session_state:
-    st.session_state.detected_networks = []
-
-
-# -----------------------------
-# Helpers
-# -----------------------------
-
-def is_private_ipv4(ip):
-    """Return True only for RFC1918 private IPv4 addresses."""
-    try:
-        return ipaddress.ip_address(ip).version == 4 and ipaddress.ip_address(ip).is_private
-    except ValueError:
-        return False
-
+# ------------------------------------------------------------
+# Local network detection
+# ------------------------------------------------------------
 
 def get_local_ip():
-    """
-    محاولة معرفة IPv4 المحلي للجهاز الذي يشغل Streamlit.
-    لا يتم إرسال أي بيانات إلى الإنترنت.
-    """
+    """Return the IPv4 address used by this machine for local networking."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("192.0.2.1", 80))
         ip = sock.getsockname()[0]
         sock.close()
-
-        if is_private_ipv4(ip):
-            return ip
-
+        return ip
     except Exception:
-        pass
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return ""
 
-    return ""
+
+def prefix_from_mask(mask):
+    try:
+        return ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+    except Exception:
+        return None
 
 
 def get_local_networks():
     """
-    محاولة اكتشاف الشبكات المحلية من الجهاز الذي يشغل Streamlit.
-    Windows: ipconfig
-    Linux: ip -4 addr
+    Discover IPv4 networks configured on the machine.
+
+    psutil is preferred because it gives the actual interface netmask.
+    A small fallback is included for systems without psutil.
     """
-    networks = set()
-    system = platform.system().lower()
+    networks = []
 
     try:
-        if system == "windows":
-            output = subprocess.check_output(
-                ["ipconfig"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-                encoding="utf-8",
-                errors="ignore",
-            )
+        import psutil
 
-            current_ip = None
-            for line in output.splitlines():
-                ip_match = re.search(
-                    r"IPv4[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})",
-                    line,
-                    re.IGNORECASE,
-                )
-
-                if ip_match:
-                    current_ip = ip_match.group(1)
+        for iface, addresses in psutil.net_if_addrs().items():
+            for addr in addresses:
+                if addr.family != socket.AF_INET:
                     continue
-
-                mask_match = re.search(
-                    r"Subnet Mask[^:]*:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})",
-                    line,
-                    re.IGNORECASE,
-                )
-
-                if mask_match and current_ip:
-                    try:
-                        network = ipaddress.ip_network(
-                            f"{current_ip}/{mask_match.group(1)}",
-                            strict=False,
-                        )
-
-                        if network.version == 4 and network.is_private:
-                            networks.add(str(network))
-
-                    except ValueError:
-                        pass
-
-                    current_ip = None
-
-        elif system == "linux":
-            output = subprocess.check_output(
-                ["ip", "-4", "addr"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-
-            for match in re.finditer(
-                r"inet\s+(\d{1,3}(?:\.\d{1,3}){3})/(\d+)",
-                output,
-            ):
-                ip = match.group(1)
-                prefix = match.group(2)
-
+                ip = addr.address
+                mask = addr.netmask
+                if not ip or not mask:
+                    continue
                 try:
                     network = ipaddress.ip_network(
-                        f"{ip}/{prefix}",
-                        strict=False,
+                        f"{ip}/{mask}", strict=False
                     )
-
-                    if network.is_private:
-                        networks.add(str(network))
-
+                    if network.version == 4 and network.is_private:
+                        networks.append({
+                            "interface": iface,
+                            "ip": ip,
+                            "netmask": mask,
+                            "cidr": str(network),
+                        })
                 except ValueError:
                     pass
-
     except Exception:
-        pass
+        ip = get_local_ip()
+        if ip:
+            # Fallback only. A plain IP cannot reveal the true subnet size.
+            parts = ip.split(".")
+            if len(parts) == 4:
+                networks.append({
+                    "interface": "Unknown",
+                    "ip": ip,
+                    "netmask": "255.255.255.0",
+                    "cidr": f"{parts[0]}.{parts[1]}.{parts[2]}.0/24",
+                })
 
-    # Fallback: infer a /24 from the local IP.
-    if not networks:
-        local_ip = get_local_ip()
+    # Remove duplicates while preserving order.
+    unique = []
+    seen = set()
+    for item in networks:
+        if item["cidr"] not in seen:
+            seen.add(item["cidr"])
+            unique.append(item)
 
-        if local_ip:
-            try:
-                networks.add(
-                    str(
-                        ipaddress.ip_network(
-                            f"{local_ip}/24",
-                            strict=False,
-                        )
-                    )
-                )
-            except ValueError:
-                pass
-
-    return sorted(
-        networks,
-        key=lambda value: (
-            ipaddress.ip_network(value).network_address,
-            ipaddress.ip_network(value).prefixlen,
-        ),
-    )
+    return unique
 
 
-def normalize_network_input(value):
+def resolve_scan_target(value):
     """
     Accept:
-      192.168.1.25       -> 192.168.1.0/24
-      192.168.1.0/24    -> 192.168.1.0/24
+      192.168.1.0/24
+      192.168.1.20
+
+    For a plain IP, use the actual local interface network when possible.
+    If the IP is not one of this machine's local addresses, fall back to
+    /24 and clearly tell the user that CIDR is more accurate.
     """
     value = value.strip()
-
     if not value:
         raise ValueError("أدخل IP أو Network CIDR.")
 
+    # CIDR supplied directly.
     if "/" in value:
         network = ipaddress.ip_network(value, strict=False)
-    else:
-        ip = ipaddress.ip_address(value)
+        if network.version != 4:
+            raise ValueError("الإصدار المدعوم حاليًا هو IPv4 فقط.")
+        return network, "تم استخدام الـ CIDR الذي أدخلته."
 
-        if ip.version != 4:
-            raise ValueError("الإصدار الحالي يدعم IPv4 فقط.")
+    # Plain IPv4 address.
+    try:
+        target_ip = ipaddress.ip_address(value)
+    except ValueError:
+        raise ValueError("عنوان IP غير صحيح.")
 
-        if not ip.is_private:
-            raise ValueError(
-                "للحماية، استخدم IP خاص داخل الشبكة المحلية، "
-                "مثل 192.168.1.25 أو 10.0.0.20."
+    if target_ip.version != 4:
+        raise ValueError("الإصدار المدعوم حاليًا هو IPv4 فقط.")
+
+    local_networks = get_local_networks()
+
+    # If the entered IP belongs to one of this machine's interfaces,
+    # use that interface's actual subnet.
+    for item in local_networks:
+        network = ipaddress.ip_network(item["cidr"], strict=False)
+        if target_ip in network:
+            return network, (
+                f"تم اكتشاف الشبكة تلقائيًا من الواجهة {item['interface']}: "
+                f"{network}"
             )
 
-        # Default assumption for a single IP.
-        # The user can enter CIDR explicitly if their LAN is not /24.
-        network = ipaddress.ip_network(
-            f"{ip}/24",
-            strict=False,
-        )
+    # Safe convenience fallback. Tell the user that CIDR is preferable.
+    parts = str(target_ip).split(".")
+    network = ipaddress.ip_network(
+        f"{parts[0]}.{parts[1]}.{parts[2]}.0/24",
+        strict=False,
+    )
+    return network, (
+        "لم أجد هذا الـ IP على واجهة الجهاز؛ تم افتراض /24. "
+        "إذا كانت الشبكة مختلفة، أدخلها بصيغة CIDR مثل 10.10.0.0/16."
+    )
 
-    if network.version != 4:
-        raise ValueError("الإصدار الحالي يدعم IPv4 فقط.")
 
-    if not network.is_private:
-        raise ValueError(
-            "هذه الأداة مخصصة للشبكات المحلية الخاصة فقط "
-            "(مثل 192.168.x.x أو 10.x.x.x أو 172.16-31.x.x)."
-        )
-
-    hosts = list(network.hosts())
-
-    if len(hosts) > 1024:
-        raise ValueError(
-            "الحد الأقصى للفحص هو 1024 عنوانًا."
-        )
-
-    return network
-
+# ------------------------------------------------------------
+# Discovery
+# ------------------------------------------------------------
 
 def ping(ip):
-    """إرسال Ping واحد."""
-
     system = platform.system().lower()
 
     try:
         if system == "windows":
-            command = [
-                "ping",
-                "-n",
-                "1",
-                "-w",
-                "800",
-                ip,
-            ]
+            command = ["ping", "-n", "1", "-w", "800", ip]
         else:
-            command = [
-                "ping",
-                "-c",
-                "1",
-                "-W",
-                "1",
-                ip,
-            ]
+            command = ["ping", "-c", "1", "-W", "1", ip]
 
         result = subprocess.run(
             command,
@@ -298,45 +198,105 @@ def ping(ip):
             stderr=subprocess.DEVNULL,
             timeout=2,
         )
-
         return result.returncode == 0
-
     except Exception:
         return False
 
 
-def get_hostname(ip):
-    """Reverse DNS."""
-
+@lru_cache(maxsize=2048)
+def get_mac_vendor(mac):
+    """Best-effort local OUI/vendor lookup. Never treats a vendor as proof of device type."""
+    if not mac:
+        return ""
     try:
-        hostname = socket.gethostbyaddr(ip)[0]
-        return hostname
+        from mac_vendor_lookup import MacLookup
+        return MacLookup().lookup(mac)
+    except Exception:
+        return ""
+
+
+def get_netbios_name(ip):
+    """Windows-only local NetBIOS name lookup; may fail on devices that do not advertise it."""
+    if platform.system().lower() != "windows":
+        return ""
+    try:
+        result = subprocess.run(
+            ["nbtstat", "-A", ip],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        for line in result.stdout.splitlines():
+            match = re.search(r"^\s*([^\\s<]{1,40})\s+<00>\s+", line)
+            if match and match.group(1) not in {"*", "WORKGROUP"}:
+                return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def classify_device(hostname, vendor):
+    """Conservative device classification based only on locally observed labels."""
+    text_value = f"{hostname} {vendor}".lower()
+
+    rules = [
+        ("كاميرا محتملة", ["camera", "cam", "hikvision", "dahua", "axis", "reolink", "ezviz", "arlo"]),
+        ("طابعة محتملة", ["printer", "print", "hp", "hewlett", "epson", "brother", "canon", "lexmark"]),
+        ("هاتف/جهاز لوحي محتمل", ["iphone", "ipad", "android", "samsung", "pixel", "oneplus", "xiaomi", "huawei"]),
+        ("حاسب محتمل", ["windows", "desktop", "laptop", "macbook", "imac", "pc", "computer", "dell", "lenovo", "asus", "acer", "microsoft", "apple"]),
+        ("جهاز شبكة محتمل", ["router", "gateway", "access point", "ap", "switch", "ubiquiti", "mikrotik", "cisco", "tp-link", "netgear", "aruba"]),
+        ("تلفاز/وسائط محتمل", ["tv", "roku", "chromecast", "firetv", "smarttv", "lg electronics", "sony", "tcl"]),
+    ]
+
+    for label, keywords in rules:
+        for keyword in keywords:
+            if keyword in text_value:
+                return label, "متوسطة"
+
+    if vendor:
+        return "جهاز غير محدد", "منخفضة"
+    return "غير معروف", "غير متاحة"
+
+
+def get_hostname(ip):
+    try:
+        return socket.gethostbyaddr(ip)[0]
     except Exception:
         return ""
 
 
 def get_arp_table():
     """
-    قراءة جدول ARP من الجهاز الذي يشغل التطبيق.
+    Read the ARP table of the machine running NetworkScope.
+    This is intentionally local-only.
     """
-
     arp = {}
 
     try:
-        output = subprocess.check_output(
-            ["arp", "-a"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            encoding="utf-8",
-            errors="ignore",
-        )
+        if platform.system().lower() == "windows":
+            output = subprocess.check_output(
+                ["arp", "-a"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            # "arp -a" is available on many systems; fall back to ip neigh.
+            try:
+                output = subprocess.check_output(
+                    ["arp", "-a"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                output = subprocess.check_output(
+                    ["ip", "neigh"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
     except Exception:
         return arp
 
-    ip_pattern = re.compile(
-        r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-    )
-
+    ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
     mac_pattern = re.compile(
         r"\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b"
     )
@@ -354,38 +314,37 @@ def get_arp_table():
 
 
 def scan_network(cidr, workers=32):
-    """
-    فحص شبكة IPv4 محلية خاصة.
-    يتم الفحص من الجهاز الذي يشغل Streamlit.
-    """
+    network = ipaddress.ip_network(cidr, strict=False)
 
-    network = normalize_network_input(cidr)
+    if network.version != 4:
+        raise ValueError("هذا الإصدار يدعم IPv4 فقط.")
+
+    if not network.is_private:
+        raise ValueError(
+            "الفحص المحلي مخصص للشبكات الخاصة. "
+            "استخدم شبكة تملكها أو لديك تصريح بفحصها."
+        )
 
     hosts = list(network.hosts())
-    arp_table = get_arp_table()
+
+    if len(hosts) > 1024:
+        raise ValueError(
+            "النطاق كبير جدًا لهذه الواجهة. "
+            "استخدم نطاقًا أصغر، مثل /24."
+        )
+
     discovered = []
-
-    progress = st.progress(
-        0,
-        text=f"بدء فحص {network}...",
-    )
-
+    progress = st.progress(0, text="بدء فحص الشبكة...")
     completed = 0
 
-    with ThreadPoolExecutor(
-        max_workers=workers
-    ) as executor:
-
+    # Ping first to populate the local ARP cache where possible.
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(
-                ping,
-                str(ip),
-            ): str(ip)
+            executor.submit(ping, str(ip)): str(ip)
             for ip in hosts
         }
 
         for future in as_completed(futures):
-
             ip = futures[future]
 
             try:
@@ -393,33 +352,71 @@ def scan_network(cidr, workers=32):
             except Exception:
                 alive = False
 
-            # Ping + ARP:
-            # Some devices/firewalls do not answer ICMP but can still
-            # appear in the local ARP table.
-            if alive or ip in arp_table:
-                hostname = get_hostname(ip) if alive else ""
-
-                discovered.append(
-                    {
-                        "IP": ip,
-                        "MAC": arp_table.get(ip, ""),
-                        "Hostname": hostname,
-                        "Status": (
-                            "نشط"
-                            if alive
-                            else "ظاهر في ARP"
-                        ),
-                    }
-                )
+            if alive:
+                hostname = get_hostname(ip) or get_netbios_name(ip)
+                discovered.append({
+                    "IP": ip,
+                    "MAC": "",
+                    "Hostname": hostname,
+                    "Vendor": "",
+                    "Device Type": "غير محدد",
+                    "Confidence": "غير متاحة",
+                    "Status": "نشط",
+                })
 
             completed += 1
-
             progress.progress(
                 completed / len(hosts),
                 text=f"فحص {completed} من {len(hosts)}",
             )
 
     progress.empty()
+
+    # Read ARP after the ping sweep so newly discovered local devices
+    # can appear with their MAC address.
+    arp_table = get_arp_table()
+
+    by_ip = {item["IP"]: item for item in discovered}
+
+    for ip, mac in arp_table.items():
+        try:
+            if ipaddress.ip_address(ip) in network:
+                vendor = get_mac_vendor(mac)
+                if ip in by_ip:
+                    by_ip[ip]["MAC"] = mac
+                    by_ip[ip]["Vendor"] = vendor
+                else:
+                    hostname = get_hostname(ip) or get_netbios_name(ip)
+                    device_type, confidence = classify_device(hostname, vendor)
+                    by_ip[ip] = {
+                        "IP": ip,
+                        "MAC": mac,
+                        "Hostname": hostname,
+                        "Vendor": vendor,
+                        "Device Type": device_type,
+                        "Confidence": confidence,
+                        "Status": "ظاهر في ARP",
+                    }
+        except ValueError:
+            pass
+
+    # Enrich every discovered device after ARP data is available.
+    for item in by_ip.values():
+        vendor = item.get("Vendor", "")
+        if not vendor and item.get("MAC"):
+            vendor = get_mac_vendor(item["MAC"])
+        item["Vendor"] = vendor
+
+        hostname = item.get("Hostname", "")
+        if not hostname:
+            hostname = get_hostname(item["IP"]) or get_netbios_name(item["IP"])
+        item["Hostname"] = hostname
+
+        device_type, confidence = classify_device(hostname, vendor)
+        item["Device Type"] = device_type
+        item["Confidence"] = confidence
+
+    discovered = list(by_ip.values())
 
     discovered.sort(
         key=lambda item: ipaddress.ip_address(item["IP"])
@@ -430,20 +427,12 @@ def scan_network(cidr, workers=32):
 
 def export_csv(data):
     output = io.StringIO()
-
     writer = csv.DictWriter(
         output,
-        fieldnames=[
-            "IP",
-            "MAC",
-            "Hostname",
-            "Status",
-        ],
+        fieldnames=["IP", "MAC", "Hostname", "Vendor", "Device Type", "Confidence", "Status"],
     )
-
     writer.writeheader()
     writer.writerows(data)
-
     return output.getvalue().encode("utf-8-sig")
 
 
@@ -452,10 +441,7 @@ def export_csv(data):
 # ============================================================
 
 st.sidebar.title("🌐 NetworkScope")
-
-st.sidebar.caption(
-    "Local Network Discovery Tool"
-)
+st.sidebar.caption("Local Network Discovery Tool")
 
 page = st.sidebar.radio(
     "القائمة",
@@ -474,7 +460,6 @@ st.sidebar.warning(
     "أو لديك تصريح صريح بفحصها."
 )
 
-
 # ============================================================
 # Dashboard
 # ============================================================
@@ -485,10 +470,9 @@ if page == "لوحة التحكم":
         '<div class="main-title">🌐 NetworkScope</div>',
         unsafe_allow_html=True,
     )
-
     st.markdown(
         '<div class="subtitle">'
-        "لوحة مراقبة واكتشاف الأجهزة داخل الشبكة المحلية"
+        "اكتشاف الأجهزة داخل الشبكة المحلية التي يشغَّل منها التطبيق"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -496,43 +480,31 @@ if page == "لوحة التحكم":
     results = st.session_state.results
 
     total_devices = len(results)
-
     active_devices = sum(
-        1
-        for device in results
-        if device["Status"] == "نشط"
+        1 for d in results if d["Status"] == "نشط"
     )
-
     arp_devices = sum(
-        1
-        for device in results
-        if device["Status"] == "ظاهر في ARP"
+        1 for d in results if d["Status"] == "ظاهر في ARP"
     )
-
     mac_devices = sum(
-        1
-        for device in results
-        if device["MAC"]
+        1 for d in results if d["MAC"]
     )
 
     col1, col2, col3, col4 = st.columns(4)
-
     col1.metric("الأجهزة المكتشفة", total_devices)
     col2.metric("أجهزة نشطة", active_devices)
-    col3.metric("ARP", arp_devices)
+    col3.metric("ظاهر في ARP", arp_devices)
     col4.metric("MAC متوفر", mac_devices)
 
     if st.session_state.last_network:
-        st.caption(
+        st.info(
             f"آخر شبكة تم فحصها: {st.session_state.last_network}"
         )
 
     st.divider()
 
     if results:
-
-        st.subheader("📋 الأجهزة المكتشفة")
-
+        st.subheader("📋 الأجهزة المكتشفة ونوعها المحتمل")
         st.dataframe(
             results,
             use_container_width=True,
@@ -546,12 +518,10 @@ if page == "لوحة التحكم":
             mime="text/csv",
             use_container_width=True,
         )
-
     else:
-
         st.info(
             "لا توجد نتائج حتى الآن. "
-            "اذهب إلى «فحص الشبكة» وابدأ عملية الفحص."
+            "اذهب إلى «فحص الشبكة» وابدأ الفحص."
         )
 
 
@@ -563,119 +533,90 @@ elif page == "فحص الشبكة":
 
     st.title("🔎 فحص الشبكة")
 
-    st.write(
-        "أدخل IP واحدًا أو Network CIDR. "
-        "إذا أدخلت IP فقط، سيُفترض /24 تلقائيًا."
-    )
+    local_networks = get_local_networks()
 
-    st.code(
-        "192.168.1.25  →  192.168.1.0/24\n"
-        "192.168.1.0/24 →  192.168.1.0/24",
-        language="text",
-    )
+    if local_networks:
+        st.success("تم اكتشاف الشبكات المحلية على هذا الجهاز.")
 
-    # Auto-detect networks
-    detected = get_local_networks()
-    st.session_state.detected_networks = detected
-
-    if detected:
-        st.success(
-            "الشبكات المحلية المكتشفة على الجهاز: "
-            + ", ".join(detected)
-        )
+        options = [
+            f'{x["interface"]} — {x["ip"]} — {x["cidr"]}'
+            for x in local_networks
+        ]
 
         selected = st.selectbox(
-            "اختيار شبكة مكتشفة",
-            ["—"] + detected,
-        )
-    else:
-        selected = "—"
-        st.info(
-            "تعذر اكتشاف الشبكة تلقائيًا. يمكنك إدخال IP أو CIDR يدويًا."
+            "اختر الشبكة المتصلة حاليًا",
+            options,
         )
 
-    cidr_or_ip = st.text_input(
+        selected_index = options.index(selected)
+        detected_cidr = local_networks[selected_index]["cidr"]
+
+        if st.button(
+            "استخدام الشبكة المكتشفة",
+            use_container_width=True,
+        ):
+            st.session_state.scan_target = detected_cidr
+
+    st.write(
+        "أدخل IP عاديًا مثل 192.168.1.20، "
+        "أو أدخل الشبكة مباشرة مثل 192.168.1.0/24."
+    )
+
+    target_value = st.text_input(
         "IP أو Network CIDR",
-        value=(
-            selected
-            if selected != "—"
-            else (get_local_ip() or "192.168.1.25")
-        ),
-        placeholder="مثال: 192.168.1.25 أو 192.168.1.0/24",
-        help=(
-            "IP منفرد = يفترض /24. "
-            "إذا كانت شبكتك /23 أو /16 مثلًا، أدخل CIDR صراحة."
-        ),
+        value=get_local_ip(),
+        placeholder="192.168.1.20 أو 192.168.1.0/24",
     ).strip()
 
     try:
-        network = normalize_network_input(cidr_or_ip)
+        network, explanation = resolve_scan_target(target_value)
+        st.info(explanation)
+        st.code(str(network), language="text")
+
         host_count = len(list(network.hosts()))
 
-        col1, col2, col3 = st.columns(3)
-
+        col1, col2 = st.columns(2)
         col1.metric("الشبكة التي سيتم فحصها", str(network))
-        col2.metric("عدد العناوين", host_count)
-        col3.metric("Private Network", "نعم")
+        col2.metric("عدد عناوين الأجهزة", host_count)
 
-        if "/" not in cidr_or_ip:
-            st.warning(
-                "تم افتراض /24 لأنك أدخلت IP فقط. "
-                "إذا كانت الشبكة تستخدم قناعًا مختلفًا، أدخل CIDR الصحيح."
-            )
+        workers = st.slider(
+            "عدد عمليات الفحص المتوازية",
+            min_value=4,
+            max_value=64,
+            value=32,
+        )
 
-    except Exception as error:
-        network = None
-        st.error(str(error))
+        if st.button(
+            "🚀 بدء فحص الشبكة",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner(
+                    f"يتم فحص {network} من هذا الجهاز..."
+                ):
+                    results = scan_network(
+                        str(network),
+                        workers,
+                    )
 
-    st.divider()
+                st.session_state.results = results
+                st.session_state.last_network = str(network)
 
-    workers = st.slider(
-        "عدد عمليات الفحص المتوازية",
-        min_value=4,
-        max_value=64,
-        value=32,
-    )
-
-    if st.button(
-        "🚀 بدء فحص الشبكة",
-        type="primary",
-        use_container_width=True,
-        disabled=network is None,
-    ):
-
-        try:
-
-            with st.spinner(
-                f"يتم فحص {network}..."
-            ):
-                results = scan_network(
-                    str(network),
-                    workers,
+                st.success(
+                    f"انتهى الفحص — تم العثور على "
+                    f"{len(results)} جهاز/عنوان."
                 )
 
-            st.session_state.results = results
-            st.session_state.last_network = str(network)
+            except Exception as error:
+                st.error(f"حدث خطأ: {error}")
 
-            st.success(
-                f"انتهى الفحص — تم العثور على "
-                f"{len(results)} جهاز/عنوان."
-            )
-
-            st.rerun()
-
-        except Exception as error:
-
-            st.error(
-                f"حدث خطأ: {error}"
-            )
+    except Exception as error:
+        st.error(str(error))
 
     if st.session_state.results:
-
         st.divider()
-
         st.subheader("📋 نتائج آخر فحص")
-
         st.dataframe(
             st.session_state.results,
             use_container_width=True,
@@ -689,12 +630,7 @@ elif page == "فحص الشبكة":
 
 elif page == "بحث عن IP":
 
-    st.title("📍 البحث عن IP")
-
-    st.write(
-        "هذه الصفحة للبحث داخل نتائج آخر فحص. "
-        "للعثور على أجهزة جديدة، استخدم «فحص الشبكة»."
-    )
+    st.title("📍 البحث عن جهاز داخل النتائج")
 
     ip_input = st.text_input(
         "أدخل IP",
@@ -702,9 +638,7 @@ elif page == "بحث عن IP":
     ).strip()
 
     if ip_input:
-
         try:
-
             ipaddress.ip_address(ip_input)
 
             matches = [
@@ -714,37 +648,28 @@ elif page == "بحث عن IP":
             ]
 
             if matches:
-
                 device = matches[0]
 
                 st.success("تم العثور على الجهاز.")
 
                 col1, col2, col3 = st.columns(3)
-
                 col1.metric("IP", device["IP"])
                 col2.metric(
                     "MAC",
                     device["MAC"] or "غير متاح",
                 )
-                col3.metric(
-                    "الحالة",
-                    device["Status"],
-                )
+                col3.metric("الحالة", device["Status"])
 
                 st.write(
                     "Hostname:",
                     device["Hostname"] or "غير متاح",
                 )
-
             else:
-
                 st.info(
-                    "هذا الـIP غير موجود في نتائج آخر فحص. "
-                    "ارجع إلى «فحص الشبكة» وأعد الفحص إذا كنت تتوقع وجوده."
+                    "هذا الـ IP غير موجود في نتائج آخر فحص."
                 )
 
         except ValueError:
-
             st.error("عنوان IP غير صحيح.")
 
 
@@ -760,48 +685,60 @@ elif page == "حول المشروع":
         """
 ## ما هو NetworkScope؟
 
-NetworkScope هو مشروع مبني باستخدام **Streamlit**
-لاكتشاف الأجهزة الموجودة داخل شبكة IPv4 محلية.
+NetworkScope هو مشروع Streamlit لاكتشاف الأجهزة
+داخل شبكة IPv4 محلية من الجهاز الذي يشغّل التطبيق.
 
-### الوظائف
+### ماذا يفعل؟
 
-- 🔎 اكتشاف الأجهزة المستجيبة لـ Ping
-- 📡 قراءة ARP المحلي
-- 💻 عرض IP
-- 🆔 عرض MAC Address عندما يكون متاحًا
-- 🖥️ محاولة معرفة Hostname
-- 📊 Dashboard
-- 🔍 البحث عن IP
-- 📥 تصدير النتائج CSV
-- 🧭 اكتشاف الشبكة المحلية تلقائيًا
-- ⌨️ قبول IP منفرد أو CIDR
+- 🔎 يكتشف الأجهزة التي تستجيب لـ Ping.
+- 📡 يقرأ جدول ARP المحلي.
+- 💻 يعرض IP Address.
+- 🆔 يعرض MAC Address عندما يكون متاحًا.
+- 🖥️ يحاول معرفة Hostname.
+- 🏷️ يحاول تحديد الشركة المصنعة من MAC/OUI.
+- 🔎 يصنف نوع الجهاز بشكل محافظ بناءً على الاسم والشركة.
+- 📊 يعرض النتائج في Dashboard.
+- 🔍 يسمح بالبحث عن IP داخل نتائج الفحص.
+- 📥 يصدّر النتائج إلى CSV.
+- 🌐 يكتشف الشبكة المحلية تلقائيًا عند توفر معلومات الواجهة.
 
-### مهم
+### نقطة مهمة جدًا
 
-الأداة لا تقوم بـ:
+إذا كتبت IP فقط، فإن البرنامج لا يستطيع معرفة قناع الشبكة
+من الرقم وحده. لذلك يحاول أولًا معرفة الشبكة من إعدادات
+واجهة الشبكة في الجهاز.
 
-- تجاوز كلمات المرور.
-- تسجيل الدخول إلى الأجهزة.
-- اختراق الأجهزة.
-- تجاوز صلاحيات الشبكة.
-- فحص الإنترنت العام.
-- الوصول إلى كاميرات أو أجهزة لا تملك تصريحًا بفحصها.
+مثال:
 
-### ملاحظة تقنية مهمة
+192.168.1.20 → قد تكون /24 أو /23 أو غير ذلك.
 
-الفحص يتم من **الجهاز الذي يشغّل Streamlit**.
+لذلك عند الحاجة للدقة، استخدم CIDR:
 
-إذا شغّلت التطبيق على جهازك داخل شبكة منزلية،
-فسيستطيع فحص الشبكة المحلية التي يستطيع جهازك الوصول إليها.
+192.168.1.0/24
 
-أما إذا رفعت التطبيق على خدمة Cloud،
-فلن يستطيع التطبيق رؤية شبكتك المنزلية لمجرد أنك فتحت الموقع من جهازك؛
-لأن عملية الفحص تنفذ من السيرفر الذي يشغّل التطبيق.
+### حدود الأداة
+
+الأداة لا:
+
+- تتجاوز كلمات المرور.
+- تسجل الدخول إلى الأجهزة.
+- تخترق الأجهزة.
+- تتجاوز صلاحيات الشبكة.
+- تفحص الإنترنت العام.
+- تضمن تحديد أن الجهاز كاميرا بمجرد اكتشاف IP.
+
+### أين يتم الفحص؟
+
+الفحص يتم من الجهاز الذي يشغّل Streamlit.
+
+إذا شغّلت التطبيق على جهازك وهو متصل بشبكة الفندق
+أو المنزل المصرح لك بفحصها، فالأداة تفحص الشبكة التي
+يستطيع ذلك الجهاز الوصول إليها.
+
+أما إذا رفعت Streamlit على Cloud، فإن السيرفر السحابي
+هو الذي سيحاول الفحص، وليس جهاز الزائر.
 """
     )
 
     st.divider()
-
-    st.caption(
-        "NetworkScope • Streamlit Network Discovery"
-    )
+    st.caption("NetworkScope • Local Network Discovery • Device Fingerprinting")
