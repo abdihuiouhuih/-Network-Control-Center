@@ -185,38 +185,46 @@ def resolve_scan_target(value):
 
 def ping(ip):
     system = platform.system().lower()
-
     try:
         if system == "windows":
-            command = ["ping", "-n", "1", "-w", "800", ip]
+            command = ["ping", "-n", "1", "-w", "500", ip]
         else:
             command = ["ping", "-c", "1", "-W", "1", ip]
-
         result = subprocess.run(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=2,
+            timeout=1.5,
         )
         return result.returncode == 0
     except Exception:
         return False
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=1)
+def _vendor_lookup():
+    try:
+        from mac_vendor_lookup import MacLookup
+        return MacLookup()
+    except Exception:
+        return None
+
+
 def get_mac_vendor(mac):
-    """Best-effort local OUI/vendor lookup. Never treats a vendor as proof of device type."""
+    """Best-effort OUI lookup. Vendor is evidence, not proof of device type."""
     if not mac:
         return ""
     try:
-        from mac_vendor_lookup import MacLookup
-        return MacLookup().lookup(mac)
+        lookup = _vendor_lookup()
+        if lookup:
+            return lookup.lookup(mac)
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def get_netbios_name(ip):
-    """Windows-only local NetBIOS name lookup; may fail on devices that do not advertise it."""
+    """Windows NetBIOS lookup; many phones/IoT devices do not advertise it."""
     if platform.system().lower() != "windows":
         return ""
     try:
@@ -224,38 +232,15 @@ def get_netbios_name(ip):
             ["nbtstat", "-A", ip],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=2.5,
         )
         for line in result.stdout.splitlines():
-            match = re.search(r"^\s*([^\\s<]{1,40})\s+<00>\s+", line)
+            match = re.search(r"^\s*([^\s<]{1,40})\s+<00>\s+", line)
             if match and match.group(1) not in {"*", "WORKGROUP"}:
                 return match.group(1).strip()
     except Exception:
         pass
     return ""
-
-
-def classify_device(hostname, vendor):
-    """Conservative device classification based only on locally observed labels."""
-    text_value = f"{hostname} {vendor}".lower()
-
-    rules = [
-        ("كاميرا محتملة", ["camera", "cam", "hikvision", "dahua", "axis", "reolink", "ezviz", "arlo"]),
-        ("طابعة محتملة", ["printer", "print", "hp", "hewlett", "epson", "brother", "canon", "lexmark"]),
-        ("هاتف/جهاز لوحي محتمل", ["iphone", "ipad", "android", "samsung", "pixel", "oneplus", "xiaomi", "huawei"]),
-        ("حاسب محتمل", ["windows", "desktop", "laptop", "macbook", "imac", "pc", "computer", "dell", "lenovo", "asus", "acer", "microsoft", "apple"]),
-        ("جهاز شبكة محتمل", ["router", "gateway", "access point", "ap", "switch", "ubiquiti", "mikrotik", "cisco", "tp-link", "netgear", "aruba"]),
-        ("تلفاز/وسائط محتمل", ["tv", "roku", "chromecast", "firetv", "smarttv", "lg electronics", "sony", "tcl"]),
-    ]
-
-    for label, keywords in rules:
-        for keyword in keywords:
-            if keyword in text_value:
-                return label, "متوسطة"
-
-    if vendor:
-        return "جهاز غير محدد", "منخفضة"
-    return "غير معروف", "غير متاحة"
 
 
 def get_hostname(ip):
@@ -265,164 +250,224 @@ def get_hostname(ip):
         return ""
 
 
-def get_arp_table():
-    """
-    Read the ARP table of the machine running NetworkScope.
-    This is intentionally local-only.
-    """
-    arp = {}
+# Common TCP services used only as discovery evidence.
+# They do not log in or send application data.
+DISCOVERY_PORTS = {
+    22: "SSH",
+    23: "Telnet",
+    53: "DNS",
+    80: "HTTP",
+    443: "HTTPS",
+    445: "SMB",
+    515: "LPD Printer",
+    554: "RTSP",
+    631: "IPP Printer",
+    8000: "HTTP-Alt",
+    8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+    9100: "JetDirect Printer",
+    3389: "RDP",
+}
 
+
+def tcp_probe(ip, port, timeout=0.25):
+    """Check whether a TCP service accepts a connection."""
     try:
-        if platform.system().lower() == "windows":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return sock.connect_ex((ip, port)) == 0
+    except Exception:
+        return False
+
+
+def probe_services(ip, workers=16):
+    """Return open common TCP services without authentication or payloads."""
+    found = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(tcp_probe, ip, port): (port, name)
+            for port, name in DISCOVERY_PORTS.items()
+        }
+        for future in as_completed(futures):
+            port, name = futures[future]
+            try:
+                if future.result():
+                    found.append((port, name))
+            except Exception:
+                pass
+    return sorted(found)
+
+
+def classify_device(hostname, vendor, services):
+    """Conservative classification from hostname/vendor/service evidence."""
+    text_value = f"{hostname} {vendor}".lower()
+    ports = {p for p, _ in services}
+
+    # Stronger service combinations first.
+    if 554 in ports:
+        return "كاميرا/جهاز فيديو محتمل", "مرتفعة"
+    if ports.intersection({9100, 631, 515}):
+        return "طابعة محتملة", "مرتفعة"
+    if 445 in ports or 3389 in ports:
+        return "حاسب Windows محتمل", "مرتفعة"
+    if 22 in ports and ports.intersection({80, 443, 8080, 8443}):
+        return "جهاز شبكة/جهاز Linux محتمل", "متوسطة"
+
+    rules = [
+        ("كاميرا محتملة", ["camera", "cam", "hikvision", "dahua", "axis", "reolink", "ezviz", "arlo"]),
+        ("طابعة محتملة", ["printer", "print", "hp", "hewlett", "epson", "brother", "canon", "lexmark"]),
+        ("هاتف/جهاز لوحي محتمل", ["iphone", "ipad", "android", "samsung", "pixel", "oneplus", "xiaomi", "huawei"]),
+        ("حاسب محتمل", ["windows", "desktop", "laptop", "macbook", "imac", "pc", "computer", "dell", "lenovo", "asus", "acer", "microsoft", "apple"]),
+        ("جهاز شبكة محتمل", ["router", "gateway", "access point", "switch", "ubiquiti", "mikrotik", "cisco", "tp-link", "netgear", "aruba"]),
+        ("تلفاز/وسائط محتمل", ["tv", "roku", "chromecast", "firetv", "smarttv", "lg electronics", "sony", "tcl"]),
+    ]
+
+    for label, keywords in rules:
+        if any(keyword in text_value for keyword in keywords):
+            return label, "متوسطة"
+
+    if vendor or services:
+        return "جهاز غير محدد", "منخفضة"
+    return "غير معروف", "غير متاحة"
+
+
+def get_arp_table():
+    """Read the local ARP/neighbor table."""
+    arp = {}
+    try:
+        system = platform.system().lower()
+        if system == "windows":
             output = subprocess.check_output(
-                ["arp", "-a"],
-                text=True,
-                stderr=subprocess.DEVNULL,
+                ["arp", "-a"], text=True, stderr=subprocess.DEVNULL
             )
         else:
-            # "arp -a" is available on many systems; fall back to ip neigh.
             try:
                 output = subprocess.check_output(
-                    ["arp", "-a"],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
+                    ["ip", "neigh"], text=True, stderr=subprocess.DEVNULL
                 )
             except Exception:
                 output = subprocess.check_output(
-                    ["ip", "neigh"],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
+                    ["arp", "-a"], text=True, stderr=subprocess.DEVNULL
                 )
     except Exception:
         return arp
 
     ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-    mac_pattern = re.compile(
-        r"\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b"
-    )
+    mac_pattern = re.compile(r"\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b")
 
     for line in output.splitlines():
         ip_match = ip_pattern.search(line)
         mac_match = mac_pattern.search(line)
-
         if ip_match and mac_match:
-            ip = ip_match.group(0)
-            mac = mac_match.group(0).replace("-", ":").upper()
-            arp[ip] = mac
-
+            arp[ip_match.group(0)] = mac_match.group(0).replace("-", ":").upper()
     return arp
 
 
 def scan_network(cidr, workers=32):
+    """Multi-signal local discovery: ARP + ICMP + common TCP services."""
     network = ipaddress.ip_network(cidr, strict=False)
 
     if network.version != 4:
         raise ValueError("هذا الإصدار يدعم IPv4 فقط.")
-
     if not network.is_private:
         raise ValueError(
-            "الفحص المحلي مخصص للشبكات الخاصة. "
-            "استخدم شبكة تملكها أو لديك تصريح بفحصها."
+            "الفحص المحلي مخصص للشبكات الخاصة. استخدم شبكة تملكها أو لديك تصريح بفحصها."
         )
 
     hosts = list(network.hosts())
-
     if len(hosts) > 1024:
-        raise ValueError(
-            "النطاق كبير جدًا لهذه الواجهة. "
-            "استخدم نطاقًا أصغر، مثل /24."
-        )
+        raise ValueError("النطاق كبير جدًا. استخدم نطاقًا أصغر، مثل /24.")
 
-    discovered = []
-    progress = st.progress(0, text="بدء فحص الشبكة...")
+    # Snapshot before the scan: useful when devices already exist in ARP.
+    arp_before = get_arp_table()
+    candidates = set(ip for ip in arp_before if ipaddress.ip_address(ip) in network)
+
+    progress = st.progress(0, text="اكتشاف الأجهزة: Ping + ARP + الخدمات...")
     completed = 0
 
-    # Ping first to populate the local ARP cache where possible.
+    # Phase 1: ICMP. A device does NOT need to answer ICMP to be discovered.
+    alive = set()
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(ping, str(ip)): str(ip)
-            for ip in hosts
-        }
-
+        futures = {executor.submit(ping, str(ip)): str(ip) for ip in hosts}
         for future in as_completed(futures):
             ip = futures[future]
-
             try:
-                alive = future.result()
+                if future.result():
+                    alive.add(ip)
+                    candidates.add(ip)
             except Exception:
-                alive = False
-
-            if alive:
-                hostname = get_hostname(ip) or get_netbios_name(ip)
-                discovered.append({
-                    "IP": ip,
-                    "MAC": "",
-                    "Hostname": hostname,
-                    "Vendor": "",
-                    "Device Type": "غير محدد",
-                    "Confidence": "غير متاحة",
-                    "Status": "نشط",
-                })
-
+                pass
             completed += 1
             progress.progress(
-                completed / len(hosts),
-                text=f"فحص {completed} من {len(hosts)}",
+                completed / max(len(hosts), 1),
+                text=f"اكتشاف الأجهزة {completed}/{len(hosts)}",
             )
+
+    # Phase 2: TCP discovery for hosts that did not answer ping.
+    # This is the key fix for phones/IoT that ignore ICMP.
+    tcp_candidates = set()
+    with ThreadPoolExecutor(max_workers=min(workers, 32)) as executor:
+        futures = {
+            executor.submit(probe_services, str(ip)): str(ip)
+            for ip in hosts
+            if str(ip) not in alive
+        }
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                services = future.result()
+                if services:
+                    tcp_candidates.add(ip)
+                    candidates.add(ip)
+            except Exception:
+                pass
 
     progress.empty()
 
-    # Read ARP after the ping sweep so newly discovered local devices
-    # can appear with their MAC address.
-    arp_table = get_arp_table()
+    # Phase 3: refresh ARP after touching the subnet.
+    arp_after = get_arp_table()
+    arp = dict(arp_before)
+    arp.update(arp_after)
 
-    by_ip = {item["IP"]: item for item in discovered}
+    # Build final records. Probe services only for candidates so the scan
+    # does not unnecessarily connect to every port on every address twice.
+    records = []
+    for ip in sorted(candidates, key=ipaddress.ip_address):
+        mac = arp.get(ip, "")
+        vendor = get_mac_vendor(mac)
+        hostname = get_hostname(ip) or get_netbios_name(ip)
+        services = probe_services(ip)
+        service_names = ", ".join(name for _, name in services)
 
-    for ip, mac in arp_table.items():
-        try:
-            if ipaddress.ip_address(ip) in network:
-                vendor = get_mac_vendor(mac)
-                if ip in by_ip:
-                    by_ip[ip]["MAC"] = mac
-                    by_ip[ip]["Vendor"] = vendor
-                else:
-                    hostname = get_hostname(ip) or get_netbios_name(ip)
-                    device_type, confidence = classify_device(hostname, vendor)
-                    by_ip[ip] = {
-                        "IP": ip,
-                        "MAC": mac,
-                        "Hostname": hostname,
-                        "Vendor": vendor,
-                        "Device Type": device_type,
-                        "Confidence": confidence,
-                        "Status": "ظاهر في ARP",
-                    }
-        except ValueError:
-            pass
+        device_type, confidence = classify_device(
+            hostname, vendor, services
+        )
 
-    # Enrich every discovered device after ARP data is available.
-    for item in by_ip.values():
-        vendor = item.get("Vendor", "")
-        if not vendor and item.get("MAC"):
-            vendor = get_mac_vendor(item["MAC"])
-        item["Vendor"] = vendor
+        evidence = []
+        if ip in alive:
+            evidence.append("Ping")
+        if ip in arp:
+            evidence.append("ARP")
+        if services:
+            evidence.append("TCP: " + service_names)
 
-        hostname = item.get("Hostname", "")
-        if not hostname:
-            hostname = get_hostname(item["IP"]) or get_netbios_name(item["IP"])
-        item["Hostname"] = hostname
+        # Prefer a real hostname; otherwise give a clearly marked inferred name.
+        device_name = hostname or device_type
 
-        device_type, confidence = classify_device(hostname, vendor)
-        item["Device Type"] = device_type
-        item["Confidence"] = confidence
+        records.append({
+            "IP": ip,
+            "Device Name": device_name,
+            "MAC": mac,
+            "Vendor": vendor,
+            "Hostname": hostname,
+            "Device Type": device_type,
+            "Confidence": confidence,
+            "Services": service_names,
+            "Evidence": " + ".join(evidence),
+            "Status": "نشط" if ip in alive else "مكتشف عبر الشبكة",
+        })
 
-    discovered = list(by_ip.values())
-
-    discovered.sort(
-        key=lambda item: ipaddress.ip_address(item["IP"])
-    )
-
-    return discovered
+    return records
 
 
 def export_csv(data):
@@ -607,6 +652,14 @@ elif page == "فحص الشبكة":
                     f"انتهى الفحص — تم العثور على "
                     f"{len(results)} جهاز/عنوان."
                 )
+
+                if not results:
+                    st.warning(
+                        "لم يتم اكتشاف أجهزة. إذا كنت متأكدًا أن هناك أجهزة متصلة، "
+                        "فقد تكون الشبكة تستخدم Client/AP Isolation أو أن الجهاز الذي "
+                        "يشغّل NetworkScope ليس على نفس الـLAN. جرّب أولًا اختيار "
+                        "الشبكة المكتشفة من واجهة الجهاز، ثم أعد الفحص."
+                    )
 
             except Exception as error:
                 st.error(f"حدث خطأ: {error}")
